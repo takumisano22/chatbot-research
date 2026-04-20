@@ -1,0 +1,147 @@
+﻿# [bolt-002 P1 Docker Compose] バックエンド・Next.js フロントのコンテナ定義と固定ポート。env は env_file: .env で渡す。
+# [bolt-003 フェーズB] 会話永続化用 PostgreSQL（公式 postgres:16-alpine・ヘルスチェック・名前付きボリューム）と backend の起動順制御。
+# 公開ポート: backend 8000 / frontend 3001 / postgres 5433→5432 / vector_store 8002 / ruri-embed 8003（コンテナ内 8000）
+# RAG はベクトルDBコンテナへ HTTP で保存・検索する（backend コンテナにデータディレクトリをマウントしない）。
+# 初期化は init サービス 1 本（init/run.sh で Alembic）。完了後に backend / ingest_worker が起動する。
+#
+# init / backend / ingest_worker はいずれも backend/Dockerfile の同一イメージ。
+# 取り込み処理は `app.rag.ingest_pipeline.jobs`（ワーカー）と API を同一イメージに含め、プロセスだけ `ingest_worker` で起動する。
+x-backend-app: &backend_app
+  build:
+    context: .
+    dockerfile: backend/Dockerfile
+  image: ollama-chatbot-backend:latest
+  env_file:
+    - .env
+
+services:
+  # [bolt-003 フェーズB] 会話永続化用 RDB。healthy になるまで backend は起動しない。
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "5433:5432"
+    env_file:
+      - .env
+    # 公式イメージは POSTGRES_* を要求するため、.env の DB_* から写す（ここが env_file より優先）
+    environment:
+      POSTGRES_USER: ${DB_USER:-app}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-app}
+      POSTGRES_DB: ${DB_NAME:-app_db}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck: # DB 起動後に依存するため backend は healthy 待ちにする。
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # 起動前初期化（Alembic）。`init/run.sh` を 1 回実行して終了。
+  init:
+    <<: *backend_app
+    command: ["sh", "/app/init/run.sh"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  # [bolt-005] ベクトルDB（独立コンテナ）。デバッグ用にホスト 8002 で公開。
+  vector_store:
+    image: chromadb/chroma:1.5.7
+    ports:
+      - "8002:8000"
+    environment:
+      IS_PERSISTENT: "TRUE"
+      # イメージ既定: /data を永続化先として使う
+      PERSIST_DIRECTORY: /data
+      CHROMA_CORS_ALLOW_ORIGINS: '["http://localhost:8090","http://127.0.0.1:8090"]'
+      ANONYMIZED_TELEMETRY: "False"
+    volumes:
+      # ホスト上の実体名は `${VECTOR_STORE_PROVIDER}_data`（.env の provider で区別。既定は chroma_data）
+      - rag_vector_provider_data:/data
+
+  # [bolt-002/003] FastAPI。bolt-003 で postgres healthy 待ちを追加。
+  backend:
+    <<: *backend_app
+    ports:
+      - "8000:8000"
+    environment:
+      # 実験バッチ（.env と合成。未設定なら compose 側の既定は無効のまま）
+      EXPERIMENT_BATCH_ENABLED: ${EXPERIMENT_BATCH_ENABLED:-false}
+      EXPERIMENT_IDLE_SHUTDOWN_SECONDS: ${EXPERIMENT_IDLE_SHUTDOWN_SECONDS:-0}
+      EXPERIMENT_IDLE_STOP_SHELL: ${EXPERIMENT_IDLE_STOP_SHELL:-}
+      EXPERIMENT_API_TOKEN: ${EXPERIMENT_API_TOKEN:-}
+      RAG_HYBRID_DELEGATE: ${RAG_HYBRID_DELEGATE:-vector_search}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      init:
+        condition: service_completed_successfully
+      vector_store:
+        condition: service_started
+
+  # RAG PDF 取り込みジョブ（PostgreSQL キュー + ベクトルDB）。backend と同一イメージ。
+  ingest_worker:
+    <<: *backend_app
+    command: ["python", "-m", "app.rag.ingest_pipeline.jobs", "--interval", "1.0"]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      init:
+        condition: service_completed_successfully
+      vector_store:
+        condition: service_started
+
+  # [bolt-002] Next.js（standalone）。ブラウザはホストの :3001 から開き、API は NEXT_PUBLIC_API_BASE_URL（ビルド時）で localhost:8000 等を指す。
+  frontend:
+    build:
+      context: frontend_nextjs
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
+        NEXT_PUBLIC_LLM_REQUEST_TIMEOUT_SECONDS: ${NEXT_PUBLIC_LLM_REQUEST_TIMEOUT_SECONDS:-600}
+    image: ollama-chatbot-frontend:latest
+    ports:
+      - "3001:3001"
+    depends_on:
+      - backend
+
+  # Ruri 系埋め込み API（ruri-embed-service）。backend は EMBEDDING_PROVIDER=ruri_http と EMBEDDING_BASE_URL=http://ruri-embed:8000 で利用。
+  # ホスト公開は backend:8000 と競合しないよう 8003:8000。独立しているので不要ならコメントアウトでOK
+
+  # ruri-embed:
+  #   build:
+  #     context: ./ruri-embed-service
+  #   ports:
+  #     - "8003:8000"
+  #   environment:
+  #     EMBEDDING_MODEL: cl-nagoya/ruri-v3-310m
+  #     EMBEDDING_DEVICE: cpu
+  #     HF_HOME: /data/huggingface
+  #   volumes:
+  #     - ruri_hf_cache:/data/huggingface
+  #   # startup でモデルロード後にのみ応答する。backend / ingest_worker の先回り接続（Connection refused）を防ぐ。
+  #   healthcheck:
+  #     test:
+  #       [
+  #         "CMD",
+  #         "python",
+  #         "-c",
+  #         "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')",
+  #       ]
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 30
+  #     start_period: 300s
+
+# [bolt-003 フェーズB] データディレクトリの永続化（名前付きボリューム）
+# rag_vector_provider_data の実体名は VECTOR_STORE_PROVIDER に追従（例: chroma_data / 将来の別 provider）
+volumes:
+  postgres_data:
+  rag_vector_provider_data:
+    name: ${VECTOR_STORE_PROVIDER:-chroma}_data
+  #ruri_hf_cache:

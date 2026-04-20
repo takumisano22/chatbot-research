@@ -1,0 +1,2 @@
+# POSIX シェル（Docker init 等）は CRLF だと dash で `set: Illegal option -` になるため LF 固定
+init/*.sh text eol=lf

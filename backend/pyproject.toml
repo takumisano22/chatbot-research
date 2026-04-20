@@ -1,0 +1,53 @@
+[project]
+name = "local-chatbot-backend"
+version = "0.1.0"
+description = "FastAPI + LangChain chat API (P0)"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115.0",
+    "python-multipart>=0.0.9",
+    "uvicorn[standard]>=0.32.0",
+    "langchain-core>=0.3.0",
+    "langchain-text-splitters>=0.3.0",
+    # LangChain の ChatOllama 等は llm_definitions 配布の llm_bridges.llm_provider（LLM_ADAPTER_SUBPACKAGE でサブモジュール選択）
+    "llm_bridges @ file:../llm_definitions",
+    # vector DB クライアントは vectordb パッケージ経由（backend から直接 import しない）
+    "vectordb @ file:../vector_stores",
+    # テストで最小 PDF を生成する用途（MarkItDown PDF 取り込みは markitdown[pdf] 側）
+    "pypdf>=5.0.0",
+    "markitdown[pdf]>=0.1.0",
+    "opencv-python-headless>=4.10.0",
+    "pydantic-settings>=2.0.0",
+    # [bolt-003 フェーズD] SQLAlchemy 2.0 非同期 ORM（AsyncSession・create_async_engine）
+    "sqlalchemy[asyncio]>=2.0.36",
+    # [bolt-003 フェーズD] postgresql+asyncpg:// 接続用（アプリから asyncpg を直接 import しない）
+    "asyncpg>=0.29.0",
+    # [bolt-003 フェーズD] sqlite+aiosqlite:/// 接続用（pytest の in-memory のみ）
+    "aiosqlite>=0.20.0",
+    # 観測（無効時は app.langfuse が no-op。SDK は langfuse 配下に閉じる）
+    "langfuse>=4.0.0,<5",
+    # 実験バッチの RAGAS 評価（Faithfulness 等）。未使用ルートでは import のみガード可。
+    "ragas>=0.4.3,<0.5",
+]
+
+[project.optional-dependencies]
+dev = ["httpx>=0.27.0", "pytest>=8.0.0", "ruff>=0.9.0"]
+# Docker の init ワンショット（init/run.sh）・ローカル alembic 用（同期ドライバ）
+migrate = ["alembic>=1.14.0", "psycopg[binary]>=3.2.0"]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*"]
+namespaces = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

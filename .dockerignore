@@ -1,0 +1,117 @@
+# backend の build.context はリポジトリルート。フロントは frontend_nextjs / frontend_streamlit は各コンテキストでビルド。
+# Docker は .gitignore を読まないため、ホスト向け除外は下記「共通」と .gitignore を同期すること。
+
+# --- ホスト生成物・ツール（.gitignore と同一）---
+
+# 秘密・ローカル環境
+.env
+.env.local
+.env.*.local
+
+# エディタ・ローカル AI
+.cursor/
+.cursorignore
+agent-transcripts/
+mcps/
+
+# IDE
+.idea/
+
+# Python 仮想環境・ロック
+**/.venv/
+venv/
+uv.lock
+**/uv.lock
+
+# バイトコード・キャッシュ
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+
+# パッケージング成果物
+**/*.egg-info/
+**/build/
+**/dist/
+**/.eggs/
+*.whl
+
+# テスト支援・型チェックの生成物
+.hypothesis/
+**/.hypothesis/
+**/.ipynb_checkpoints/
+**/.benchmarks/
+.dmypy.json
+dmypy.json
+
+# カバレッジ・マルチ環境ツール
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.tox/
+.nox/
+
+# ログ・ローカル永続データ
+*.log
+logs/
+data/
+**/.chroma/
+
+# Streamlit ホスト、direnv
+**/.streamlit/
+.direnv/
+.envrc
+
+# 鍵・証明書（誤取り込み防止）
+*.pem
+*.key
+id_rsa
+id_rsa.pub
+*.p12
+
+# OS ごみ
+**/.DS_Store
+**/Thumbs.db
+**/desktop.ini
+*.swp
+*~
+
+# Compose ローカル上書き
+docker-compose.override.yml
+
+# --- Git 追跡だが Dockerfile の COPY に不要 ---
+
+# VCS・CI
+.git/
+.github/
+
+# エディタ（コンテキスト縮小。設定をイメージに載せない）
+.vscode/
+
+# Compose 定義（ランタイムは compose が読む）
+compose.yaml
+compose.*.yaml
+docker-compose*.yaml
+
+# ルートのメタ文書
+/*.md
+LICENSE*
+CHANGELOG*
+SECURITY.md
+
+# ドキュメント・テスト
+docs/
+backend/tests/
+frontend_streamlit/
+frontend_nextjs/
+# パッケージ内の開発者向け README（ランタイム不要・ビルド文脈の縮小）
+backend/app/rag/ingest_pipeline/README.md
+
+# リポジトリメタ（ランタイム不要）
+.gitignore
+.dockerignore
+.gitattributes
+.cursorignore

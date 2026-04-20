@@ -1,0 +1,18 @@
+[project]
+name = "vectordb"
+version = "0.1.0"
+description = "ベクトルストア実装（vectordb.chroma 等を横並びで配置。sample は互換シム）"
+requires-python = ">=3.11"
+dependencies = [
+    "chromadb>=1.5.7,<2.0.0",
+    # 既存コレクションへのベクトル検索（query・距離→Document 変換を集約）
+    "langchain-chroma>=1.0.0,<2.0.0",
+]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["vectordb*"]

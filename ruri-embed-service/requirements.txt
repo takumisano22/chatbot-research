@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+# ST 3.x は一部モデルで AutoProcessor 経路となり Ruri(ModernBERT) で失敗するため 2.x に固定する
+sentence-transformers>=2.7.0,<3.0.0
+transformers>=4.48.0,<5
+torch==2.6.0
+# トークナイザ・一部 HF 周辺で暗黙依存になりがちなため明示（Ruri / ModernBERT 読み込み時の不足回避）
+sentencepiece>=0.1.99
+protobuf>=4.25.0,<6
