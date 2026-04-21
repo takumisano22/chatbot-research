@@ -9,7 +9,6 @@ import yaml
 from pydantic import BaseModel, Field, field_validator
 
 from app.core.config import Settings
-from app.rag.schemas import RagSearchMode
 
 # -----------------------------------------------------------------------------
 # 役割: research_pair YAML/JSON のスキーマとファイル解決（実験 1 条件 = 1 ファイル）。
@@ -34,7 +33,7 @@ class ResearchPair(BaseModel):
     chunking_logic_id: str = Field(..., min_length=1)
     reranking_logic_id: str = Field(..., min_length=1)
     tokenizer_logic_id: str = Field(..., min_length=1)
-    prompt_logic_id: str = Field(..., min_length=1)
+    prompt_id: str = Field(..., min_length=1)
 
     top_k: int = Field(..., ge=1, le=500)
     qa_dataset: str = Field(
@@ -44,7 +43,6 @@ class ResearchPair(BaseModel):
     )
     document_set_id: str = Field(..., min_length=1)
     ragas_enabled: bool = False
-    rag_search_mode: RagSearchMode = "vector_search"
     rag_hybrid_delegate: Literal["vector_search", "keyword_search"] | None = None
 
     @field_validator(
@@ -52,7 +50,7 @@ class ResearchPair(BaseModel):
         "chunking_logic_id",
         "reranking_logic_id",
         "tokenizer_logic_id",
-        "prompt_logic_id",
+        "prompt_id",
     )
     @classmethod
     def _logic_id_fmt(cls, v: str) -> str:
@@ -91,11 +89,10 @@ class ResearchPair(BaseModel):
             "chunking_logic_id": self.chunking_logic_id,
             "reranking_logic_id": self.reranking_logic_id,
             "tokenizer_logic_id": self.tokenizer_logic_id,
-            "prompt_logic_id": self.prompt_logic_id,
+            "prompt_id": self.prompt_id,
             "top_k": self.top_k,
             "qa_dataset": self.qa_dataset,
             "document_set_id": self.document_set_id,
-            "rag_search_mode": self.rag_search_mode,
             "ragas_enabled": self.ragas_enabled,
         }
         return json.dumps(d, ensure_ascii=False, sort_keys=True)

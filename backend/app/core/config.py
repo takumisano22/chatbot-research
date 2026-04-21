@@ -43,9 +43,6 @@ class Settings(BaseSettings):
     ## 設定ファイルで見つからない場合のデフォルトフィールド設定。（FD*で省略記法しているfield_defaultsが構文。※app.coreからインポート）
 
     app_env: str = FD.DEFAULT_APP_ENV
-    api_host: str = FD.DEFAULT_API_HOST
-    api_port: int = FD.DEFAULT_API_PORT
-    cors_origins: str = FD.DEFAULT_CORS_ORIGINS
 
     llm_provider: str = FD.DEFAULT_LLM_PROVIDER
     llm_api_base_url: str = FD.DEFAULT_LLM_API_BASE_URL
@@ -82,11 +79,6 @@ class Settings(BaseSettings):
     )
     rag_chunk_size: int = FD.DEFAULT_RAG_CHUNK_SIZE
     rag_chunk_overlap: int = FD.DEFAULT_RAG_CHUNK_OVERLAP
-    rag_prompt_logic_id: str = Field(
-        default=FD.DEFAULT_RAG_PROMPT_LOGIC_ID,
-        min_length=1,
-        description="HTTP RAG のシステムプロンプト（prompt_logic_<id>）。",
-    )
 
     # Langfuse（別ホスト想定。未設定・無効時は観測を送らない）
     langfuse_enabled: bool = False
@@ -112,10 +104,6 @@ class Settings(BaseSettings):
         description="実験 CSV 出力先。",
     )
 
-    rag_pdf_max_files_per_request: int = FD.DEFAULT_RAG_PDF_MAX_FILES_PER_REQUEST
-    rag_pdf_max_bytes_per_file: int = FD.DEFAULT_RAG_PDF_MAX_BYTES_PER_FILE
-    rag_text_md_max_files_per_request: int = FD.DEFAULT_RAG_TEXT_MD_MAX_FILES_PER_REQUEST
-    rag_text_md_max_bytes_per_file: int = FD.DEFAULT_RAG_TEXT_MD_MAX_BYTES_PER_FILE
     pdf_extraction_mode: str = FD.DEFAULT_PDF_EXTRACTION_MODE
     pdf_ocr_auto_min_chars_per_page: int = Field(
         default=FD.DEFAULT_PDF_OCR_AUTO_MIN_CHARS_PER_PAGE,

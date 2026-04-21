@@ -22,15 +22,14 @@
 - 任意: `llm_model`, `llm_api_base_url`, `llm_temperature`, `llm_request_timeout_seconds`
 - 任意: `embedding_provider`, `embedding_base_url`, `embedding_model`
 - `ragas_enabled`: `true` / `false`（OFF 時も CSV の RAGAS 列は空で残る）
-- `rag_search_mode`: `vector_search` | `keyword_search` | `hybrid_search`
-- `rag_hybrid_delegate`: `hybrid_search` 時のみ `vector_search` | `keyword_search`
+- 任意: `rag_hybrid_delegate`（ランタイムの `Settings.rag_hybrid_delegate` を上書き、`vector_search` | `keyword_search`）
 
 `search_logic_id` の例:
 
 - `logic_01`: ベクトル検索のみ（通常の RAG 取り込みありの前提）。
 - `logic_02`: 検索結果常に空（コンテキスト無し。ingest 済みでも検索はスキップ）。
 
-通常の検索窓口（実験以外の単体テスト等）は `app.rag.logic.search` の `search_documents`。実験バッチでは `logic/search/search_logic_XX.py` の `retrieve` が使われます。
+通常の検索窓口（実験以外の単体テスト等）は `app.rag.logic.search` の `search_documents`（ベクトル検索）。キーワード検索は `app.rag.logic.keyword_search.search_keyword_chunks`。実験バッチでは `logic/search/search_logic_XX.py` の `retrieve` が使われます。
 
 `logic_id` は **`logic_01`** の形式（英小文字・数字・アンダースコア）。新しいロジックは `backend/app/rag/logic/<category>/<category>_logic_XX.py` に追加し、所定の関数を実装してください。
 
@@ -77,7 +76,7 @@ docker compose -f compose.yaml run --rm experiment_runner --research-pair RP-000
 
 - `retrieved_source_i`, `retrieved_chunk_id_i`, `retrieved_distance_i`, `retrieved_text_i`（`i = 1..top_k`）
 
-固定列には `research_pair_id`, **`research_pair_spec`**（比較用の JSON 文字列）, `question_index`, `document_set_id`, `dataset_name`, 入出力、レイテンシ、プロンプト、`rag_search_mode`, `rag_hybrid_delegate`, `top_k`, 各 logic_id, LLM / embedding 名, `ragas_faithfulness`, `ragas_answer_relevancy` が含まれます。
+固定列には `research_pair_id`, **`research_pair_spec`**（比較用の JSON 文字列）, `question_index`, `document_set_id`, `dataset_name`, 入出力、レイテンシ、`top_k`, 各 logic_id, LLM / embedding 名, `ragas_faithfulness`, `ragas_answer_relevancy` が含まれます。
 
 ## 環境変数（`.env`）
 

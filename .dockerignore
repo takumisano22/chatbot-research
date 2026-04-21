@@ -1,44 +1,41 @@
-# backend の build.context はリポジトリルート。フロントは frontend_nextjs / frontend_streamlit は各コンテキストでビルド。
-# Docker は .gitignore を読まないため、ホスト向け除外は下記「共通」と .gitignore を同期すること。
+# 実験ランナー（backend/Dockerfile, context=リポジトリルート）向け。
+# COPY 対象は backend/pyproject.toml · backend/app/ · llm_definitions/ · vector_stores/ のソースのみ。
+# compose でマウントするディレクトリ・ローカル永続はコンテキストに含めない。
 
-# --- ホスト生成物・ツール（.gitignore と同一）---
-
-# 秘密・ローカル環境
+# --- 秘密・ローカル環境 ---
 .env
 .env.local
 .env.*.local
 
-# エディタ・ローカル AI
+# --- compose マウント先（イメージビルド不要・コンテキスト肥大化の主因）---
+ingest_document/
+research_pairs/
+qa_datasets/
+outputs/
+
+# --- このリポジトリ内の別サービス（実験イメージの依存に含まれない）---
+ruri-embed-service/
+
+# --- エディタ・ローカル AI（ビルド無関係）---
 .cursor/
 .cursorignore
 agent-transcripts/
 mcps/
-
-# IDE
 .idea/
+.vscode/
 
-# Python 仮想環境・ロック
+# --- Python 仮想環境・ロック（イメージ内で pip install する）---
 **/.venv/
 venv/
-uv.lock
 **/uv.lock
 
-# バイトコード・キャッシュ
+# --- バイトコード・キャッシュ・テスト・型検査 ---
 **/__pycache__/
 *.py[cod]
 .pytest_cache/
 **/.pytest_cache/
 **/.mypy_cache/
 **/.ruff_cache/
-
-# パッケージング成果物
-**/*.egg-info/
-**/build/
-**/dist/
-**/.eggs/
-*.whl
-
-# テスト支援・型チェックの生成物
 .hypothesis/
 **/.hypothesis/
 **/.ipynb_checkpoints/
@@ -46,7 +43,14 @@ uv.lock
 .dmypy.json
 dmypy.json
 
-# カバレッジ・マルチ環境ツール
+# --- パッケージング成果物（ホストで pip install した残骸）---
+**/*.egg-info/
+**/build/
+**/dist/
+**/.eggs/
+*.whl
+
+# --- カバレッジ・ツール ---
 .coverage
 .coverage.*
 coverage.xml
@@ -54,64 +58,56 @@ htmlcov/
 .tox/
 .nox/
 
-# ログ・ローカル永続データ
+# --- ログ・ローカルデータ・ベクトルストア ---
 *.log
 logs/
 data/
 **/.chroma/
+**/*.sqlite3
 
-# Streamlit ホスト、direnv
+# --- その他ホスト専用 ---
 **/.streamlit/
 .direnv/
 .envrc
+docker-compose.override.yml
 
-# 鍵・証明書（誤取り込み防止）
+# --- 鍵（誤送信防止）---
 *.pem
 *.key
 id_rsa
 id_rsa.pub
 *.p12
 
-# OS ごみ
+# --- OS ごみ ---
 **/.DS_Store
 **/Thumbs.db
 **/desktop.ini
 *.swp
 *~
 
-# Compose ローカル上書き
-docker-compose.override.yml
-
-# --- Git 追跡だが Dockerfile の COPY に不要 ---
-
-# VCS・CI
+# --- Git / CI / ドキュメント / テスト（ランタイム不要）---
 .git/
 .github/
+.gitattributes
+docs/
+backend/tests/
+prompts/
+# 旧フロント（リポジトリに無くてもパターンのみ残すコストは低い）
+frontend_streamlit/
+frontend_nextjs/
 
-# エディタ（コンテキスト縮小。設定をイメージに載せない）
-.vscode/
-
-# Compose 定義（ランタイムは compose が読む）
+# --- Compose 定義（デーモンがホスト側で読む。コンテキスト省略可）---
 compose.yaml
 compose.*.yaml
 docker-compose*.yaml
 
-# ルートのメタ文書
+# --- リポジトリメタ ---
+.gitignore
+.dockerignore
 /*.md
 LICENSE*
 CHANGELOG*
 SECURITY.md
 
-# ドキュメント・テスト
-docs/
-backend/tests/
-frontend_streamlit/
-frontend_nextjs/
-# パッケージ内の開発者向け README（ランタイム不要・ビルド文脈の縮小）
-backend/app/rag/ingest_pipeline/README.md
-
-# リポジトリメタ（ランタイム不要）
-.gitignore
-.dockerignore
-.gitattributes
-.cursorignore
+# パッケージ内の README（実行に不要）
+backend/**/README.md

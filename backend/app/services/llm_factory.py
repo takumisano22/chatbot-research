@@ -5,7 +5,7 @@ from app.core.adapters import load_llm_provider_adapter
 
 # -----------------------------------------------------------------------------
 # 役割: Settings に基づき LangChain の Chat モデル（BaseChatModel）を組み立てる。
-# 主な呼び出し元: API ルートと conversation_chat_service（get_chat_model 依存）。
+# 主な呼び出し元: experiment batch_runner（get_chat_model）。
 # 流れ: プロバイダ分岐 → load_llm_provider_adapter → LlmHttpChatParams → build_compatible_chat_model。
 # -----------------------------------------------------------------------------
 

@@ -14,7 +14,7 @@ services:
   vector_store:
     image: chromadb/chroma:1.5.7
     ports:
-      - "8002:8000"
+      - "8001:8000"
     environment:
       IS_PERSISTENT: "TRUE"
       PERSIST_DIRECTORY: /data
@@ -39,4 +39,4 @@ services:
 
 volumes:
   rag_vector_provider_data:
-    name: ${VECTOR_STORE_PROVIDER:-chroma}_data
+    name: ${VECTOR_STORE_PROVIDER:-chroma}_experiment_data

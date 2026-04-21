@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -11,7 +12,7 @@ from app.experiment.research_pair_schema import load_research_pair_by_id
 
 # -----------------------------------------------------------------------------
 # 役割: research_pair を指定して 1 回のバッチ実験を実行し CSV を outputs に保存する CLI。
-# 流れ: 設定読込 → RP / QA / PDF 読込 → バッチ実行 → ファイル書き出し。
+# 流れ: 設定読込 → RP / QA / PDF 読込 → バッチ実行（QA ごとに進捗%）→ CSV 保存 → 完了を stderr。stdout 最終行は CSV パス。
 # -----------------------------------------------------------------------------
 
 
@@ -42,6 +43,11 @@ def main(argv: list[str] | None = None) -> int:
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     out_path = out_dir / f"{rp.research_pair_id}_{ts}.csv"
     out_path.write_bytes(csv_bytes)
+    print(
+        f"完了: CSV を出力しました（{rp.research_pair_id}）: {out_path.resolve()}",
+        file=sys.stderr,
+        flush=True,
+    )
     print(str(out_path.resolve()))
     return 0
 

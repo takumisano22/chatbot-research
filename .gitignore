@@ -1,15 +1,15 @@
-# Git 管理外。
-# パターンは .dockerignore の「共通」節と揃える（Docker は .gitignore を参照しない）。
-# 依存の正は pyproject.toml。venv / uv.lock はホスト検証用。
+# Git 管理外。.dockerignore のホスト生成物・ツール節と揃える（Docker は .gitignore を参照しない）。
 
-# --- ホスト生成物・ツール（.dockerignore と同一）---
-
-# 秘密・ローカル環境
+# --- 秘密・ローカル環境 ---
 .env
 .env.local
 .env.*.local
 
-# エディタ・ローカル AI
+# --- 実験出力（ディレクトリは残し中身のみ無視）---
+outputs/*
+!outputs/.gitkeep
+
+# --- エディタ・ローカル AI ---
 .cursor/
 .cursorignore
 agent-transcripts/
@@ -18,13 +18,15 @@ mcps/
 # IDE
 .idea/
 
-# Python 仮想環境・ロック
+# ワークスペース設定をリポジトリに含める場合は次行のコメントを外す
+# .vscode/
+
+# --- Python 仮想環境・ロック（正は各 pyproject.toml。venv / uv.lock はホスト検証用）---
 **/.venv/
 venv/
-uv.lock
 **/uv.lock
 
-# バイトコード・キャッシュ
+# --- バイトコード・キャッシュ ---
 **/__pycache__/
 *.py[cod]
 .pytest_cache/
@@ -32,14 +34,14 @@ uv.lock
 **/.mypy_cache/
 **/.ruff_cache/
 
-# パッケージング成果物
+# --- パッケージング成果物 ---
 **/*.egg-info/
 **/build/
 **/dist/
 **/.eggs/
 *.whl
 
-# テスト支援・型チェックの生成物
+# --- テスト支援・型チェックの生成物 ---
 .hypothesis/
 **/.hypothesis/
 **/.ipynb_checkpoints/
@@ -47,7 +49,7 @@ uv.lock
 .dmypy.json
 dmypy.json
 
-# カバレッジ・マルチ環境ツール
+# --- カバレッジ・マルチ環境ツール ---
 .coverage
 .coverage.*
 coverage.xml
@@ -55,33 +57,31 @@ htmlcov/
 .tox/
 .nox/
 
-# ログ・ローカル永続データ
+# --- ログ・ローカル永続データ ---
 *.log
 logs/
 data/
 **/.chroma/
+**/*.sqlite3
 
-# Streamlit ホスト、direnv
+# --- Streamlit ホスト、direnv ---
 **/.streamlit/
 .direnv/
 .envrc
 
-# 鍵・証明書（誤取り込み防止）
+# --- 鍵・証明書（誤コミット防止）---
 *.pem
 *.key
 id_rsa
 id_rsa.pub
 *.p12
 
-# OS ごみ
+# --- OS ごみ ---
 **/.DS_Store
 **/Thumbs.db
 **/desktop.ini
 *.swp
 *~
 
-# Compose ローカル上書き
+# --- Compose ローカル上書き ---
 docker-compose.override.yml
-
-# ワークスペース設定をリポジトリに含める場合は次行のコメントを外す
-# .vscode/

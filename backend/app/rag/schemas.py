@@ -6,10 +6,9 @@ from pydantic import BaseModel, Field
 
 # -----------------------------------------------------------------------------
 # 役割: RAG 検索ヒットの Pydantic スキーマ。
-# 主な呼び出し元: retrieval_service、logic プラグイン。
+# 主な呼び出し元: app.rag.logic.search、logic プラグイン、実験バッチ。
 # -----------------------------------------------------------------------------
 
-RagSearchMode = Literal["vector_search", "keyword_search", "hybrid_search"]
 RetrievalType = Literal["keyword", "vector"]
 
 

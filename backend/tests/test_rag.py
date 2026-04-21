@@ -9,7 +9,7 @@ from pydantic import ValidationError
 
 from app.core.config import Settings, get_settings
 from app.rag.ingest_pipeline.runner import ingest_plain_text
-from app.rag.retrieval_service import search_documents
+from app.rag.logic.keyword_search import search_keyword_chunks
 from app.rag.vectorstore.chunker import to_repo_relative
 from app.rag.vectorstore.vector_db import rag_write_session
 
@@ -52,7 +52,7 @@ def test_ingest_and_keyword_search(rag_env: Path) -> None:
     assert n_files == 1
     assert n_chunks >= 1
 
-    chunks = search_documents(settings, "Python", top_k=4, rag_search_mode="keyword_search")
+    chunks = search_keyword_chunks(settings, "Python", top_k=4)
     assert len(chunks) >= 1
     row = chunks[0]
     assert row.retrieval_type == "keyword"
@@ -72,11 +72,10 @@ def test_rag_search_japanese_sentence_query_hits(rag_env: Path) -> None:
     assert n_files == 1
     assert n_chunks >= 1
 
-    chunks = search_documents(
+    chunks = search_keyword_chunks(
         settings,
         "申請方法と承認フロー",
         top_k=4,
-        rag_search_mode="keyword_search",
     )
     assert len(chunks) >= 1
 

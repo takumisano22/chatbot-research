@@ -6,12 +6,7 @@ from pathlib import Path
 # 流れ: 定数参照 → get_settings 経由でアプリ全体に伝播（アプリロジックは持たない）。
 # -----------------------------------------------------------------------------
 
-_BYTES_PER_MIB = 1024 * 1024  ## MiB 換算（サイズ上限の計算用）
-
 DEFAULT_APP_ENV = "development"
-DEFAULT_API_HOST = "0.0.0.0"
-DEFAULT_API_PORT = 8000
-DEFAULT_CORS_ORIGINS = "http://localhost:3000,http://127.0.0.1:3000"
 
 DEFAULT_LLM_PROVIDER = "ollama"
 # llm_provider.<name> の import 先（論理 LLM_PROVIDER とは別。同 API の実装差し替え用）
@@ -38,22 +33,13 @@ DEFAULT_VECTOR_STORE_PERSIST_DIR = Path("data/vector_store")
 
 DEFAULT_RAG_COLLECTION_NAME = "rag_documents"
 DEFAULT_RAG_TOP_K = 4
-# ベクトル検索の既定件数（キーワード既定は RAG_TOP_K）。API で k を省略した vector モードでも利用。
+# ベクトル検索の既定件数（キーワード既定は RAG_TOP_K）。top_k 未指定時の vector モードのフォールバック。
 DEFAULT_RAG_VECTOR_TOP_K = 4
 DEFAULT_RAG_KEYWORD_WEIGHT = 1.0
 # hybrid_search 窓口が委譲する実検索（vector_search | keyword_search）。将来の統合実装までの切替用。
 DEFAULT_RAG_HYBRID_DELEGATE = "vector_search"
 DEFAULT_RAG_CHUNK_SIZE = 1000
 DEFAULT_RAG_CHUNK_OVERLAP = 200
-# RAG チャット API のシステムプロンプト（app.rag.logic.prompt.prompt_<id>）
-DEFAULT_RAG_PROMPT_LOGIC_ID = "logic_01"
-
-DEFAULT_RAG_PDF_MAX_FILES_PER_REQUEST = 30
-DEFAULT_RAG_PDF_MAX_BYTES_PER_FILE = 25 * _BYTES_PER_MIB
-
-# txt/md キュー・同期アップロード（RAG_TEXT_MD_*）
-DEFAULT_RAG_TEXT_MD_MAX_FILES_PER_REQUEST = 30
-DEFAULT_RAG_TEXT_MD_MAX_BYTES_PER_FILE = 25 * _BYTES_PER_MIB
 
 # PDF 抽出モード（native / ocr / auto）
 DEFAULT_PDF_EXTRACTION_MODE = "auto"

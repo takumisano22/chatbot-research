@@ -8,7 +8,7 @@ from pypdf import PdfWriter
 
 from app.core.config import Settings, get_settings
 from app.rag.ingest_batch import run_upload_items_batch
-from app.rag.retrieval_service import search_documents
+from app.rag.logic.keyword_search import search_keyword_chunks
 
 
 def _tiny_pdf_bytes() -> bytes:
@@ -44,10 +44,9 @@ def test_run_upload_items_batch_pdf_ok(tmp_path: Path, monkeypatch: pytest.Monke
     assert all(r["ok"] for r in results)
     assert all(r["chunks_written"] >= 1 for r in results)
 
-    chunks = search_documents(
+    chunks = search_keyword_chunks(
         settings,
         "page",
         top_k=4,
-        rag_search_mode="keyword_search",
     )
     assert len(chunks) >= 1

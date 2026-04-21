@@ -11,7 +11,7 @@ from app.rag.logic import vector_search as vs_mod
 from app.rag.schemas import RetrievedChunk
 
 
-def test_search_documents_final_score_is_norm_times_weight(
+def test_search_keyword_chunks_final_score_is_norm_times_weight(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # 既定 tokenizer は全文 1 トークンのため、複数語クエリのスコア検証には分割トークナイズを明示する。
@@ -41,9 +41,7 @@ def test_search_documents_final_score_is_norm_times_weight(
         rag_top_k=4,
         rag_keyword_weight=0.75,
     )
-    out = rs.search_documents(
-        settings, "python", top_k=4, rag_search_mode="keyword_search"
-    )
+    out = ks.search_keyword_chunks(settings, "python", top_k=4)
     assert len(out) == 1
     assert out[0].keyword_score_norm == 1.0
     assert out[0].final_score == pytest.approx(0.75)
@@ -51,7 +49,7 @@ def test_search_documents_final_score_is_norm_times_weight(
     assert out[0].vector_score_norm is None
 
 
-def test_search_documents_min_max_orders_and_weights(
+def test_search_keyword_chunks_min_max_orders_and_weights(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
@@ -86,9 +84,7 @@ def test_search_documents_min_max_orders_and_weights(
         rag_top_k=10,
         rag_keyword_weight=1.0,
     )
-    out = rs.search_documents(
-        settings, "python java", top_k=10, rag_search_mode="keyword_search"
-    )
+    out = ks.search_keyword_chunks(settings, "python java", top_k=10)
     assert len(out) == 2
     # raw 高い順
     assert out[0].chunk_id == "c1"
@@ -98,17 +94,14 @@ def test_search_documents_min_max_orders_and_weights(
     assert out[1].final_score == 0.0
 
 
-def test_search_documents_empty_tokens_returns_empty() -> None:
-    # トークンが空のときはストアに接続せず空リスト（retrieval_service 先頭の早期 return）。
+def test_search_keyword_chunks_empty_tokens_returns_empty() -> None:
+    # トークンが空のときはストアに接続せず空リスト。
     settings = Settings.model_construct(
         vector_store_provider=FD.DEFAULT_VECTOR_STORE_PROVIDER,
         rag_top_k=4,
         rag_keyword_weight=1.0,
     )
-    assert (
-        rs.search_documents(settings, "   ", top_k=4, rag_search_mode="keyword_search")
-        == []
-    )
+    assert ks.search_keyword_chunks(settings, "   ", top_k=4) == []
 
 
 def test_search_documents_vector_mode_empty_query_returns_empty() -> None:
@@ -116,10 +109,7 @@ def test_search_documents_vector_mode_empty_query_returns_empty() -> None:
         vector_store_provider=FD.DEFAULT_VECTOR_STORE_PROVIDER,
         rag_vector_top_k=4,
     )
-    assert (
-        rs.search_documents(settings, "   ", top_k=4, rag_search_mode="vector_search")
-        == []
-    )
+    assert rs.search_documents(settings, "   ", top_k=4) == []
 
 
 def test_search_documents_vector_mode_wires_embed_and_store(
@@ -145,7 +135,7 @@ def test_search_documents_vector_mode_wires_embed_and_store(
         vector_store_provider=FD.DEFAULT_VECTOR_STORE_PROVIDER,
         rag_vector_top_k=3,
     )
-    out = rs.search_documents(settings, "hello", top_k=None, rag_search_mode="vector_search")
+    out = rs.search_documents(settings, "hello", top_k=None)
     assert out == []
     assert captured["texts"] == ["hello"]
     assert captured["qv"] == [0.5, 0.25]

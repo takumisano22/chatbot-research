@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from chromadb.api.models.Collection import Collection
+from chromadb.errors import NotFoundError
 
 from vectordb.chroma.config import ChunkRecord, VectorSearchHit, VectorStoreConfig
 from vectordb.chroma.client import get_rag_collection, get_vector_store_client
@@ -106,8 +107,12 @@ def rag_load_keyword_rows(
 
 
 def reset_rag_collection(config: VectorStoreConfig) -> None:
+    ## 新ボリューム・初回実行ではコレクションが無く delete が NotFound になるため握りつぶす。
     client = get_vector_store_client(config)
-    client.delete_collection(name=config.collection_name)
+    try:
+        client.delete_collection(name=config.collection_name)
+    except NotFoundError:
+        return
 
 
 def is_embedding_dimension_mismatch_error(exc: Exception) -> bool:

@@ -2,9 +2,11 @@ from __future__ import annotations
 
 # 研究ペア単位で Chroma リセット・取り込み・検索・再ランク・LLM・（任意）RAGAS を行い CSV を返す。
 # runtime Settings は research_pair から 1 回だけ構築し、全問で同一コレクションを使う。
+# QA ごとに stdout へ進捗（%）を出す（# で始まる行。ingest・モデル初期化は含まない。runner の最終行は CSV パス）。
 
 import csv
 import io
+import sys
 import time
 from contextlib import ExitStack
 from typing import Any
@@ -27,7 +29,6 @@ from app.experiment.research_pair_schema import ResearchPair
 from app.rag.ingest_batch import run_upload_items_batch
 from app.rag.logic.experiment_context import active_chunking_split, active_tokenizer
 from app.rag.prompts import RAG_NO_DOCUMENTS_REPLY, build_rag_user_message
-from app.rag.schemas import RagSearchMode
 from app.rag.vectorstore.vector_db import rag_reset_collection
 from app.services.chat_service import run_chat
 from app.services.llm_factory import get_chat_model
@@ -53,13 +54,13 @@ def preflight_logic(
     tokenizer_logic_id: str,
     search_logic_id: str,
     reranking_logic_id: str,
-    prompt_logic_id: str,
+    prompt_id: str,
 ) -> None:
     load_split_for_rag("chunking", chunking_logic_id)
     load_tokenize_query("tokenizer", tokenizer_logic_id)
     load_retrieve_fn("search", search_logic_id)
     load_rerank_fn("reranking", reranking_logic_id)
-    _ = load_rag_system_message(prompt_logic_id)
+    _ = load_rag_system_message(prompt_id)
 
 
 def run_research_pair_batch_bytes(
@@ -74,7 +75,7 @@ def run_research_pair_batch_bytes(
         tokenizer_logic_id=rp.tokenizer_logic_id,
         search_logic_id=rp.search_logic_id,
         reranking_logic_id=rp.reranking_logic_id,
-        prompt_logic_id=rp.prompt_logic_id,
+        prompt_id=rp.prompt_id,
     )
     base = get_settings()
     runtime = _runtime_from_research_pair(base, rp)
@@ -83,12 +84,11 @@ def run_research_pair_batch_bytes(
         rp=rp,
         upload_items=upload_items,
         questions=questions,
-        rag_search_mode=rp.rag_search_mode,
         chunking_logic_id=rp.chunking_logic_id,
         tokenizer_logic_id=rp.tokenizer_logic_id,
         search_logic_id=rp.search_logic_id,
         reranking_logic_id=rp.reranking_logic_id,
-        prompt_logic_id=rp.prompt_logic_id,
+        prompt_id=rp.prompt_id,
         run_ragas=rp.ragas_enabled,
         dataset_name=dataset_name,
         top_k=int(rp.top_k),
@@ -105,12 +105,11 @@ def _run_batch_with_logic(
     rp: ResearchPair,
     upload_items: list[tuple[str, bytes]],
     questions: list[str],
-    rag_search_mode: RagSearchMode,
     chunking_logic_id: str,
     tokenizer_logic_id: str,
     search_logic_id: str,
     reranking_logic_id: str,
-    prompt_logic_id: str,
+    prompt_id: str,
     run_ragas: bool,
     dataset_name: str | None,
     top_k: int,
@@ -129,7 +128,7 @@ def _run_batch_with_logic(
         except ValueError as e:
             raise RuntimeError(str(e)) from e
 
-        rag_system_message = load_rag_system_message(prompt_logic_id)
+        rag_system_message = load_rag_system_message(prompt_id)
 
         fieldnames = experiment_csv_fieldnames(top_k)
         buf = io.StringIO()
@@ -142,13 +141,14 @@ def _run_batch_with_logic(
             "tokenizer_logic_id": tokenizer_logic_id,
             "search_logic_id": search_logic_id,
             "reranking_logic_id": reranking_logic_id,
-            "prompt_logic_id": prompt_logic_id,
+            "prompt_id": prompt_id,
             "llm_model": runtime.llm_model,
             "embedding_provider": runtime.embedding_provider,
             "embedding_model": runtime.embedding_model,
-            "rag_search_mode": str(rag_search_mode),
-            "rag_hybrid_delegate": str(runtime.rag_hybrid_delegate),
         }
+        n_questions = len(questions)
+        if n_questions == 0:
+            _emit_qa_progress(0, 0, rp.research_pair_id)
         for i, question in enumerate(questions):
             row = _run_one_question(
                 runtime=runtime,
@@ -156,7 +156,6 @@ def _run_batch_with_logic(
                 index=i,
                 question=question,
                 logic_meta=logic_meta,
-                rag_mode=rag_search_mode,
                 search_logic_id=search_logic_id,
                 reranking_logic_id=reranking_logic_id,
                 rag_system_message=rag_system_message,
@@ -167,6 +166,7 @@ def _run_batch_with_logic(
                 top_k=top_k,
             )
             writer.writerow(row)
+            _emit_qa_progress(i + 1, n_questions, rp.research_pair_id)
         return buf.getvalue().encode("utf-8-sig")
 
 # -----------------------------------------------------------------------------
@@ -181,7 +181,6 @@ def _run_one_question(
     index: int,
     question: str,
     logic_meta: dict[str, str],
-    rag_mode: RagSearchMode,
     search_logic_id: str,
     reranking_logic_id: str,
     rag_system_message: str,
@@ -198,7 +197,6 @@ def _run_one_question(
         runtime,
         question,
         top_k=top_k,
-        rag_search_mode=rag_mode,
     )
     chunks = call_rerank("reranking", reranking_logic_id, runtime, question, chunks)
     chunks = chunks[:top_k]
@@ -235,7 +233,6 @@ def _run_one_question(
         total_ms = rag_ms
         base_row["output"] = RAG_NO_DOCUMENTS_REPLY
         base_row["total_latency_ms"] = f"{total_ms:.3f}"
-        base_row["prompt"] = ""
         return base_row
 
     user_augmented = build_rag_user_message(question, chunks)
@@ -243,7 +240,6 @@ def _run_one_question(
         {"role": "system", "content": rag_system_message},
         {"role": "user", "content": user_augmented},
     ]
-    prompt_text = _format_prompt(messages)
     answer = run_chat(llm, messages)
     t3 = time.monotonic()
     total_ms = (t3 - t0) * 1000.0
@@ -260,7 +256,6 @@ def _run_one_question(
 
     base_row["output"] = answer
     base_row["total_latency_ms"] = f"{total_ms:.3f}"
-    base_row["prompt"] = prompt_text
     return base_row
 
 # -----------------------------------------------------------------------------
@@ -301,8 +296,14 @@ def _raise_if_ingest_failed(rows: list[dict[str, Any]]) -> None:
             raise ExperimentIngestError("ingest_failed", rows)
 
 
-def _format_prompt(messages: list[dict[str, str]]) -> str:
-    parts: list[str] = []
-    for m in messages:
-        parts.append(f"### {m['role']}\n{m.get('content', '')}")
-    return "\n\n".join(parts)
+def _emit_qa_progress(done: int, total: int, research_pair_id: str) -> None:
+    ## Docker や IDE によっては stderr がログに出にくいため、進捗は stdout（# 行）と stderr の両方へ出す。
+    if total <= 0:
+        msg = f"[{research_pair_id}] 進捗: 質問 0 件（データ行なし）"
+        print(f"# experiment progress: {msg}", flush=True)
+        print(msg, file=sys.stderr, flush=True)
+        return
+    pct = 100.0 * done / total
+    msg = f"[{research_pair_id}] 進捗: {done}/{total} ({pct:.1f}%)"
+    print(f"# experiment progress: {msg}", flush=True)
+    print(msg, file=sys.stderr, flush=True)

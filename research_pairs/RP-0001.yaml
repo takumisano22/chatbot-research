@@ -9,10 +9,9 @@ search_logic_id: logic_01
 chunking_logic_id: logic_01
 reranking_logic_id: logic_01
 tokenizer_logic_id: logic_01
-prompt_logic_id: logic_01
+prompt_id: no_01
 
 top_k: 4
 qa_dataset: sample_qa.json
 document_set_id: DOCSET-0001
 ragas_enabled: false
-rag_search_mode: vector_search

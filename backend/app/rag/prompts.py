@@ -5,7 +5,7 @@ from app.rag.schemas import RetrievedChunk
 
 # -----------------------------------------------------------------------------
 # 役割: RAG 用の定型返答と、検索チャンクからユーザー文を組み立てる。システム文は prompt ロジックから解決する。
-# 主な呼び出し元: rag / conversations ルート、conversation_chat_service、experiment batch_runner。
+# 主な呼び出し元: experiment batch_runner。
 # 流れ: rag_system_message_for_logic → load_rag_system_message / build_rag_user_message → chunks_to_context_lines。
 # -----------------------------------------------------------------------------
 

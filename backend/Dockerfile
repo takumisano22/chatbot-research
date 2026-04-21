@@ -7,8 +7,10 @@ ENV PYTHONUNBUFFERED=1
 COPY backend/pyproject.toml .
 COPY llm_definitions ../llm_definitions
 COPY vector_stores ../vector_stores
-COPY backend/app ./app
+
 RUN pip install --no-cache-dir "."
+COPY backend/app ./app
+
 
 # 既定はヘルプ表示。compose では experiment_runner が runner を上書きする。
 CMD ["python", "-m", "app.experiment.runner", "--help"]

@@ -5,7 +5,7 @@ from types import ModuleType
 from typing import Any, Callable, Final, Literal
 
 from app.core.config import Settings
-from app.rag.schemas import RagSearchMode, RetrievedChunk
+from app.rag.schemas import RetrievedChunk
 
 # -----------------------------------------------------------------------------
 # 役割: research_pair の logic_id から app.rag.logic.<pkg>.<pkg>_<id> を import（例: chunking_logic_01）。
@@ -18,7 +18,7 @@ _LISTED_LOGIC_IDS: dict[str, tuple[str, ...]] = {
     "tokenizer_logic_ids": ("logic_01",),
     "search_logic_ids": ("logic_01", "logic_02"),
     "reranking_logic_ids": ("logic_01",),
-    "prompt_logic_ids": ("logic_01",),
+    "prompt_ids": ("logic_01",),
 }
 
 
@@ -91,10 +91,9 @@ def call_retrieve(
     query: str,
     *,
     top_k: int | None,
-    rag_search_mode: RagSearchMode,
 ) -> list[RetrievedChunk]:
     fn = load_retrieve_fn(category, logic_id)
-    out = fn(settings, query, top_k=top_k, rag_search_mode=rag_search_mode)
+    out = fn(settings, query, top_k=top_k)
     if not isinstance(out, list):
         raise TypeError("retrieve は list[RetrievedChunk] を返す必要があります")
     return out

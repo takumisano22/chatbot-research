@@ -25,14 +25,14 @@ def test_search_logic_01_calls_vector_search(monkeypatch: pytest.MonkeyPatch) ->
 
     monkeypatch.setattr(s1, "search_vector_chunks", fake_vec)
     settings = Settings.model_construct(vector_store_provider=FD.DEFAULT_VECTOR_STORE_PROVIDER)
-    s1.retrieve(settings, "hello", top_k=3, rag_search_mode="vector_search")
+    s1.retrieve(settings, "hello", top_k=3)
     assert called["q"] == "hello"
     assert called["k"] == 3
 
 
 def test_search_logic_02_returns_empty() -> None:
     settings = Settings.model_construct(vector_store_provider=FD.DEFAULT_VECTOR_STORE_PROVIDER)
-    assert s2.retrieve(settings, "x", top_k=4, rag_search_mode="vector_search") == []
+    assert s2.retrieve(settings, "x", top_k=4) == []
 
 
 def test_tokenizer_logic_01_noop() -> None:

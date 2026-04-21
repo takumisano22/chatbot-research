@@ -30,7 +30,6 @@ def build_common_metadata(
     settings: Settings,
     *,
     use_rag: bool | None = None,
-    rag_search_mode: str | None = None,
 ) -> dict[str, Any]:
     meta: dict[str, Any] = {
         "app_env": settings.app_env,
@@ -47,8 +46,6 @@ def build_common_metadata(
     }
     if use_rag is not None:
         meta["use_rag"] = use_rag
-    if rag_search_mode is not None:
-        meta["rag_search_mode"] = rag_search_mode
     env = (settings.langfuse_environment or "").strip()
     if env:
         meta["langfuse_environment"] = env
@@ -76,17 +73,4 @@ def summarize_retrieved_chunks(chunks: list[RetrievedChunk]) -> dict[str, Any]:
         "chunk_ids": [c.chunk_id for c in chunks[:cap]],
         "sources": [truncate_for_observation(c.source, max_chars=160) for c in chunks[:cap]],
         "top_hits_preview": rows,
-    }
-
-## langfuse:チャット開示の入力サマリ作成　tracer.py:observe_stateless_chat()で使用
-def stateless_chat_input_summary(messages: list[dict[str, str]]) -> dict[str, Any]:
-    last_user = ""
-    for m in reversed(messages):
-        if (m.get("role") or "").lower().strip() == "user":
-            last_user = str(m.get("content") or "")
-            break
-    return {
-        "message_count": len(messages),
-        "last_user_message": truncate_for_observation(last_user),
-        "conversation_attached": False,
     }
