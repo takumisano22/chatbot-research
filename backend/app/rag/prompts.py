@@ -1,28 +1,22 @@
 from __future__ import annotations
 
+from app.experiment.logic_registry import load_rag_system_message
 from app.rag.schemas import RetrievedChunk
 
 # -----------------------------------------------------------------------------
-# 役割: RAG 用の固定システム文・定型返答と、検索チャンクからユーザー文を組み立てる。
-# 主な呼び出し元: rag / conversations ルート、conversation_chat_service。
-# 流れ: build_rag_user_message → chunks_to_context_lines で出典付きコンテキストを連結。
+# 役割: RAG 用の定型返答と、検索チャンクからユーザー文を組み立てる。システム文は prompt ロジックから解決する。
+# 主な呼び出し元: rag / conversations ルート、conversation_chat_service、experiment batch_runner。
+# 流れ: rag_system_message_for_logic → load_rag_system_message / build_rag_user_message → chunks_to_context_lines。
 # -----------------------------------------------------------------------------
 
-RAG_SYSTEM_MESSAGE = (
-"""
-##役割
--あなたは**与えられたコンテキストのみを根拠に回答するアシスタント**です。
-    
-##回答ルール
--正確かつ簡潔な回答をしてください。
--推測で補わないでください。
--回答には出典を簡潔に示してください。
-#重要なルール
--**コンテキストに情報がない場合は、分からないと答えてください。**    
-"""
-)
-
 RAG_NO_DOCUMENTS_REPLY = "参照ドキュメントから該当箇所が見つかりませんでした。"
+
+
+def rag_system_message_for_logic(logic_id: str) -> str:
+    return load_rag_system_message(logic_id)
+
+
+RAG_SYSTEM_MESSAGE = rag_system_message_for_logic("logic_01")
 
 
 def build_rag_user_message(question: str, chunks: list[RetrievedChunk]) -> str:

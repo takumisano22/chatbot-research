@@ -4,8 +4,9 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from uuid import UUID
 
 from app.core.config import Settings
+from app.experiment.logic_registry import load_rag_system_message
 from app.langfuse.tracer import observe_conversation_llm_generation, observe_conversation_rag_retrieval
-from app.rag.prompts import RAG_SYSTEM_MESSAGE, build_rag_user_message
+from app.rag.prompts import build_rag_user_message
 from app.rag.retrieval_service import search_documents
 from app.rag.schemas import RagSearchMode
 # -----------------------------------------------------------------------------
@@ -104,9 +105,10 @@ def rag_phase(
     )
 
     augmented = build_rag_user_message(user_content, chunks)
+    system_message = load_rag_system_message(settings.rag_prompt_logic_id)
 
     payload = (
-        [{"role": "system", "content": RAG_SYSTEM_MESSAGE}]
+        [{"role": "system", "content": system_message}]
         + [{"role": "user", "content": augmented}]
     )
     return payload

@@ -14,6 +14,12 @@ from app.rag.schemas import RetrievedChunk
 def test_search_documents_final_score_is_norm_times_weight(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # 既定 tokenizer は全文 1 トークンのため、複数語クエリのスコア検証には分割トークナイズを明示する。
+    monkeypatch.setattr(
+        ks,
+        "get_tokenize_query",
+        lambda: lambda q: [t for t in q.strip().lower().split() if t],
+    )
     # 上位候補が 1 件だけなら Min-Max で norm=1.0 → final = keyword_weight。
     def fake_rows(_settings: Settings, _tokens: list[str]) -> tuple[list, list, list]:
         return (
@@ -48,6 +54,11 @@ def test_search_documents_final_score_is_norm_times_weight(
 def test_search_documents_min_max_orders_and_weights(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(
+        ks,
+        "get_tokenize_query",
+        lambda: lambda q: [t for t in q.strip().lower().split() if t],
+    )
     # 2 件で raw が異なり、norm と final_score が設計どおりになる。
     def fake_rows(_settings: Settings, _tokens: list[str]) -> tuple[list, list, list]:
         return (

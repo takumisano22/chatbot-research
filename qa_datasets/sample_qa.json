@@ -1,0 +1,15 @@
+{
+  "dataset_name": "sample_qa",
+  "items": [
+    {
+      "question": "この文書セットの主題は何ですか？",
+      "reference_answer": null,
+      "metadata": {}
+    },
+    {
+      "question": "有給休暇は何日ですか？",
+      "reference_answer": null,
+      "metadata": {}
+    }
+  ]
+}

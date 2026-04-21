@@ -6,13 +6,13 @@ from typing import Any, Protocol
 
 from app.core.config import Settings
 from app.langfuse.tracer import observe_keyword_retrieval
-from app.rag.logic.tokenizer import tokenize_query
+from app.rag.logic.experiment_context import get_tokenize_query
 from app.rag.schemas import RetrievedChunk
 from app.rag.vectorstore.vector_db import rag_load_keyword_rows
 
 # -----------------------------------------------------------------------------
 # 役割: キーワード検索処理を集約し、ドキュメント保持型ベクトル DB へ被せる薄いラッパを提供する。
-# 主な呼び出し元: rag.retrieval_service（keyword モード）、rag.logic.hybrid_search。
+# 主な呼び出し元: rag.logic.search（keyword / hybrid の keyword 側）。
 # 流れ: tokenize → キーワード行ロード → スコア計算/正規化 → RetrievedChunk に詰め替え。
 # -----------------------------------------------------------------------------
 
@@ -46,7 +46,7 @@ def search_keyword_chunks(
     k = settings.rag_top_k if top_k is None else top_k
 
     def _run() -> list[RetrievedChunk]:
-        tokens = tokenize_query(query)
+        tokens = get_tokenize_query()(query)
         if not tokens:
             return []
 

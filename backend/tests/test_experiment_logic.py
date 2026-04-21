@@ -1,29 +1,18 @@
 from __future__ import annotations
 
-import pytest
-from fastapi import HTTPException
-
-from app.experiment.logic_fingerprints import get_logic_fingerprints, validate_logic_fingerprints
+from app.experiment.logic_registry import get_logic_registry_info
 
 
-def test_get_logic_fingerprints_has_three_keys() -> None:
-    fp = get_logic_fingerprints()
-    assert set(fp.keys()) == {
-        "chunking_logic_id",
-        "tokenizer_logic_id",
-        "search_logic_id",
+def test_get_logic_registry_info_keys() -> None:
+    info = get_logic_registry_info()
+    assert set(info.keys()) == {
+        "chunking_logic_ids",
+        "tokenizer_logic_ids",
+        "search_logic_ids",
+        "reranking_logic_ids",
+        "prompt_logic_ids",
     }
-    for v in fp.values():
-        assert len(v) == 64
-
-
-def test_validate_logic_rejects_mismatch() -> None:
-    fp = get_logic_fingerprints()
-    bad = {**fp, "chunking_logic_id": "0" * 64}
-    with pytest.raises(HTTPException) as ei:
-        validate_logic_fingerprints(bad)
-    assert ei.value.status_code == 400
-
-
-def test_validate_logic_accepts_current_files() -> None:
-    validate_logic_fingerprints(get_logic_fingerprints())
+    for k, v in info.items():
+        assert "logic_01" in v
+        if k == "search_logic_ids":
+            assert "logic_02" in v

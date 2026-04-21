@@ -1,14 +1,12 @@
 from __future__ import annotations
 
 from typing import Literal
-from uuid import UUID
 
 from pydantic import BaseModel, Field
 
 # -----------------------------------------------------------------------------
-# 役割: RAG 検索ヒットと取り込みジョブ応答の Pydantic スキーマ（API とサービス境界で共有）。
-# 主な呼び出し元: retrieval_service、ingest / conversations / rag ルート、ingest_pipeline.service。
-# 流れ: 各層が同一の JSON 形（フィールド意味）でデータを受け渡す。
+# 役割: RAG 検索ヒットの Pydantic スキーマ。
+# 主な呼び出し元: retrieval_service、logic プラグイン。
 # -----------------------------------------------------------------------------
 
 RagSearchMode = Literal["vector_search", "keyword_search", "hybrid_search"]
@@ -39,23 +37,3 @@ class RetrievedChunk(BaseModel):
         description="キーワード: keyword_weight * keyword_score_norm。ベクトル: vector_score_norm",
     )
     retrieval_type: RetrievalType = "keyword"
-
-
-class IngestJobFileResult(BaseModel):
-    source_name: str
-    ok: bool
-    error: str | None = None
-    chunks_written: int = 0
-
-
-class IngestJobStatusResponse(BaseModel):
-    job_id: UUID
-    status: str
-    payload_summary: str | None = None
-    error_message: str | None = None
-    results: list[IngestJobFileResult] | None = None
-
-
-class IngestJobCreatedResponse(BaseModel):
-    job_id: UUID
-    status: str = "queued"

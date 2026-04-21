@@ -1,0 +1,14 @@
+実装をcursorで実行したプロジェクトをアップロードするので、読み込んで最新状態を理解してください。そのうえで、下記の要件で修正を行いたいので、cursorに投げるプロンプトを作成してください。
+
+##要件
+#rag/logic部分の整理がしたいです。
+-search.pyをlogic配下において、検索ロジックを選択できるようにし、窓口にしてください。keyword_search.pyとvector_search.pyは基本機能として最小限の構成のまま残し、hybrid_search.pyは削除してください。logic/search/search_logic_01.pyにただvector_searchを呼び出して行うだけのコードを記載してください。
+
+-tokenizerも、experiment_context.pyに最小限のラッパだけ残して（現実装）、tokenizer.pyは削除してください。logic/tokenizer/の一つ目には何もしないまま通すLogicを作っておいてください。
+
+-search,rerankingにも何もしないという実装を追加して、ragの有無までロジック側で制御できるようにしてください。
+
+-chunkingもexperiment_contextに薄いラッパだけ残して、chunking_core.pyは削除してください。固定長だけで分割するロジックをlogic/chunking/の一つ目に作成してください。
+
+-上記の変更を基準として、そのほか全体のコードの整合性をとってください。なるべく、コードの記述とファイル数が少なくなるように、簡潔かつ正確に修正してください。
+

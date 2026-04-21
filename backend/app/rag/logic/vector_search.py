@@ -8,7 +8,7 @@ from app.rag.vectorstore.vector_db import rag_search_by_vector
 
 # -----------------------------------------------------------------------------
 # 役割: クエリを埋め込み、vectordb アダプタ経由で近傍チャンクを取得する（ストア実装は backend 外）。
-# 主な呼び出し元: rag.retrieval_service（vector モード）、rag.logic.hybrid_search。
+# 主な呼び出し元: rag.logic.search（vector モード）、logic/search/search_logic_01。
 # 流れ: embed_texts → rag_search_by_vector → list[RetrievedChunk]。
 # -----------------------------------------------------------------------------
 

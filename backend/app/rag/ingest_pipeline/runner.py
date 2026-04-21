@@ -7,7 +7,7 @@ from app.rag.vectorstore.vector_db import RagWriteSession
 
 # -----------------------------------------------------------------------------
 # 役割: プレーンテキスト全文のチャンク化と vector DB への反映（ファイル種別は上位で解決済み）。
-# 主な呼び出し元: ingest_pipeline.service。
+# 主な呼び出し元: ingest_batch（実験バッチ）。
 # 流れ: _run_chunk_stage → delete_by_source → add_chunks → 件数返却。
 # -----------------------------------------------------------------------------
 

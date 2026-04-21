@@ -10,7 +10,7 @@ from app.core import field_defaults as FD
 
 # -----------------------------------------------------------------------------
 # 役割: 環境変数と .env からアプリ設定（Pydantic Settings）を読み込み、リポジトリルートを推定する。
-# 主な呼び出し元: main・各 API ルート・サービス・RAG 層（Depends(get_settings) や get_settings() 経由）。
+# 主な呼び出し元: 実験 runner・RAG 層・Langfuse（get_settings() 経由）。
 # 流れ: get_settings（lru_cache）が Settings を生成 → 検証済みフィールドと resolve_* を各所が利用。
 # Docker 内では LANGFUSE_HOST のループバックを host.docker.internal に寄せる（model_validator）。
 # -----------------------------------------------------------------------------
@@ -47,8 +47,6 @@ class Settings(BaseSettings):
     api_port: int = FD.DEFAULT_API_PORT
     cors_origins: str = FD.DEFAULT_CORS_ORIGINS
 
-    database_url: str | None = None
-
     llm_provider: str = FD.DEFAULT_LLM_PROVIDER
     llm_api_base_url: str = FD.DEFAULT_LLM_API_BASE_URL
     llm_model: str = FD.DEFAULT_LLM_MODEL
@@ -84,6 +82,11 @@ class Settings(BaseSettings):
     )
     rag_chunk_size: int = FD.DEFAULT_RAG_CHUNK_SIZE
     rag_chunk_overlap: int = FD.DEFAULT_RAG_CHUNK_OVERLAP
+    rag_prompt_logic_id: str = Field(
+        default=FD.DEFAULT_RAG_PROMPT_LOGIC_ID,
+        min_length=1,
+        description="HTTP RAG のシステムプロンプト（prompt_logic_<id>）。",
+    )
 
     # Langfuse（別ホスト想定。未設定・無効時は観測を送らない）
     langfuse_enabled: bool = False
@@ -92,17 +95,21 @@ class Settings(BaseSettings):
     langfuse_host: str | None = None
     langfuse_environment: str | None = None
 
-    # 実験バッチ API（無効時はルート未登録・軽量）。.env の初期値はプロセス起動時の get_settings のみ。
-    experiment_batch_enabled: bool = False
-    experiment_api_token: str | None = None
-    experiment_idle_shutdown_seconds: int = Field(
-        default=0,
-        ge=0,
-        description="HTTP 非アクティブがこの秒数を超えたら停止処理へ。0 で無効。",
+    experiment_research_pairs_dir: Path = Field(
+        default=Path("research_pairs"),
+        description="research_pair ファイルのルート（相対なら REPO_ROOT 基準）。",
     )
-    experiment_idle_stop_shell: str | None = Field(
-        default=None,
-        description="非アクティブ時に sh -c で 1 回実行するコマンド（例: docker compose stop）。未設定ならプロセス SIGTERM のみ。",
+    experiment_qa_datasets_dir: Path = Field(
+        default=Path("qa_datasets"),
+        description="QA JSON の配置ディレクトリ。",
+    )
+    experiment_ingest_document_dir: Path = Field(
+        default=Path("ingest_document"),
+        description="document_set_id ごとの PDF ルート。",
+    )
+    experiment_outputs_dir: Path = Field(
+        default=Path("outputs"),
+        description="実験 CSV 出力先。",
     )
 
     rag_pdf_max_files_per_request: int = FD.DEFAULT_RAG_PDF_MAX_FILES_PER_REQUEST
@@ -165,6 +172,22 @@ class Settings(BaseSettings):
 
     def resolve_vector_store_persist_dir(self) -> Path:
         p = self.vector_store_persist_dir
+        return p.resolve() if p.is_absolute() else (REPO_ROOT / p).resolve()
+
+    def resolve_experiment_research_pairs_dir(self) -> Path:
+        p = self.experiment_research_pairs_dir
+        return p.resolve() if p.is_absolute() else (REPO_ROOT / p).resolve()
+
+    def resolve_experiment_qa_datasets_dir(self) -> Path:
+        p = self.experiment_qa_datasets_dir
+        return p.resolve() if p.is_absolute() else (REPO_ROOT / p).resolve()
+
+    def resolve_experiment_ingest_document_dir(self) -> Path:
+        p = self.experiment_ingest_document_dir
+        return p.resolve() if p.is_absolute() else (REPO_ROOT / p).resolve()
+
+    def resolve_experiment_outputs_dir(self) -> Path:
+        p = self.experiment_outputs_dir
         return p.resolve() if p.is_absolute() else (REPO_ROOT / p).resolve()
 
     @model_validator(mode="after")

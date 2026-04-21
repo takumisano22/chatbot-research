@@ -1,149 +1,246 @@
 from __future__ import annotations
 
+# 研究ペア単位で Chroma リセット・取り込み・検索・再ランク・LLM・（任意）RAGAS を行い CSV を返す。
+# runtime Settings は research_pair から 1 回だけ構築し、全問で同一コレクションを使う。
+
 import csv
 import io
 import time
+from contextlib import ExitStack
 from typing import Any
 
-from fastapi import HTTPException
 from langchain_core.language_models.chat_models import BaseChatModel
 
 from app.core.config import Settings, get_settings
-from app.experiment.logic_fingerprints import validate_logic_fingerprints
-from app.experiment.ragas_eval import run_ragas_faithfulness_row
-from app.experiment.runtime_settings import build_runtime_settings
-from app.experiment.schemas import ExperimentBatchManifest
-from app.rag.ingest_pipeline.service import run_queued_upload_batch
-from app.rag.prompts import RAG_NO_DOCUMENTS_REPLY, RAG_SYSTEM_MESSAGE, build_rag_user_message, chunks_to_context_lines
-from app.rag.retrieval_service import search_documents
-from app.rag.schemas import RagSearchMode, RetrievedChunk
+from app.experiment.csv_format import distance_cell, experiment_csv_fieldnames, snippet_cell
+from app.experiment.logic_registry import (
+    call_rerank,
+    call_retrieve,
+    load_rag_system_message,
+    load_rerank_fn,
+    load_retrieve_fn,
+    load_split_for_rag,
+    load_tokenize_query,
+)
+from app.experiment.ragas_eval import run_ragas_row_metrics
+from app.experiment.research_pair_schema import ResearchPair
+from app.rag.ingest_batch import run_upload_items_batch
+from app.rag.logic.experiment_context import active_chunking_split, active_tokenizer
+from app.rag.prompts import RAG_NO_DOCUMENTS_REPLY, build_rag_user_message
+from app.rag.schemas import RagSearchMode
 from app.rag.vectorstore.vector_db import rag_reset_collection
 from app.services.chat_service import run_chat
 from app.services.llm_factory import get_chat_model
 
 # -----------------------------------------------------------------------------
-# 役割: Chroma リセット → 既存 ingest 経路でファイル投入 → RAG 検索 + LLM を順に実行し CSV バイト列を返す。
-# 流れ: validate → runtime Settings → reset → run_queued_upload_batch → 質問ループで timing / RAGAS / CSV。
-# 要点: Langfuse は RAGAS 経路のみ使用。グローバル get_settings は変更しない。
-# ## ingest_worker と同時稼働すると Chroma への同時書き込みが競合し得るため、実験時は worker を止めるか別 compose にする。
+# 例外
 # -----------------------------------------------------------------------------
 
-_CSV_FIELDS: tuple[str, ...] = (
-    "index",
-    "input",
-    "output",
-    "rag_latency_ms",
-    "total_latency_ms",
-    "search_results",
-    "vector_distances",
-    "prompt",
-    "rag_search_mode",
-    "rag_hybrid_delegate",
-    "ragas_faithfulness",
-    "chunking_logic_id",
-    "tokenizer_logic_id",
-    "search_logic_id",
-    "llm_model",
-    "embedding_provider",
-    "embedding_model",
-)
+
+class ExperimentIngestError(Exception):
+    def __init__(self, message: str, rows: list[dict[str, Any]] | None = None) -> None:
+        super().__init__(message)
+        self.rows = rows or []
+
+# -----------------------------------------------------------------------------
+# 公開 API（エントリ）
+# -----------------------------------------------------------------------------
 
 
-def run_experiment_batch_sync(
-    manifest: ExperimentBatchManifest,
+def preflight_logic(
+    *,
+    chunking_logic_id: str,
+    tokenizer_logic_id: str,
+    search_logic_id: str,
+    reranking_logic_id: str,
+    prompt_logic_id: str,
+) -> None:
+    load_split_for_rag("chunking", chunking_logic_id)
+    load_tokenize_query("tokenizer", tokenizer_logic_id)
+    load_retrieve_fn("search", search_logic_id)
+    load_rerank_fn("reranking", reranking_logic_id)
+    _ = load_rag_system_message(prompt_logic_id)
+
+
+def run_research_pair_batch_bytes(
+    rp: ResearchPair,
     upload_items: list[tuple[str, bytes]],
+    questions: list[str],
+    *,
+    dataset_name: str | None,
 ) -> bytes:
-    validate_logic_fingerprints(
-        {
-            "chunking_logic_id": manifest.chunking_logic_id,
-            "tokenizer_logic_id": manifest.tokenizer_logic_id,
-            "search_logic_id": manifest.search_logic_id,
-        }
+    preflight_logic(
+        chunking_logic_id=rp.chunking_logic_id,
+        tokenizer_logic_id=rp.tokenizer_logic_id,
+        search_logic_id=rp.search_logic_id,
+        reranking_logic_id=rp.reranking_logic_id,
+        prompt_logic_id=rp.prompt_logic_id,
     )
     base = get_settings()
-    runtime = build_runtime_settings(base, manifest)
-    rag_reset_collection(runtime)
-    ingest_rows = run_queued_upload_batch(runtime, upload_items)
-    _raise_if_ingest_failed(ingest_rows)
+    runtime = _runtime_from_research_pair(base, rp)
+    return _run_batch_with_logic(
+        runtime=runtime,
+        rp=rp,
+        upload_items=upload_items,
+        questions=questions,
+        rag_search_mode=rp.rag_search_mode,
+        chunking_logic_id=rp.chunking_logic_id,
+        tokenizer_logic_id=rp.tokenizer_logic_id,
+        search_logic_id=rp.search_logic_id,
+        reranking_logic_id=rp.reranking_logic_id,
+        prompt_logic_id=rp.prompt_logic_id,
+        run_ragas=rp.ragas_enabled,
+        dataset_name=dataset_name,
+        top_k=int(rp.top_k),
+    )
 
-    try:
-        llm = get_chat_model(runtime)
-    except ValueError as e:
-        raise HTTPException(status_code=501, detail=str(e)) from e
-
-    buf = io.StringIO()
-    writer = csv.DictWriter(buf, fieldnames=_CSV_FIELDS, extrasaction="ignore")
-    writer.writeheader()
-    logic_meta: dict[str, str] = {
-        "chunking_logic_id": manifest.chunking_logic_id,
-        "tokenizer_logic_id": manifest.tokenizer_logic_id,
-        "search_logic_id": manifest.search_logic_id,
-        "llm_model": runtime.llm_model,
-        "embedding_provider": runtime.embedding_provider,
-        "embedding_model": runtime.embedding_model,
-        "rag_search_mode": str(manifest.rag_search_mode),
-        "rag_hybrid_delegate": str(runtime.rag_hybrid_delegate),
-    }
-    for i, question in enumerate(manifest.questions):
-        row = _run_one_question(
-            runtime,
-            llm,
-            i,
-            question,
-            logic_meta,
-            manifest.rag_search_mode,
-            manifest.run_ragas_metrics,
-        )
-        writer.writerow(row)
-    return buf.getvalue().encode("utf-8-sig")
+# -----------------------------------------------------------------------------
+# バッチ本処理（研究ペア単位・全問）
+# -----------------------------------------------------------------------------
 
 
-# --- 補助 ---
+def _run_batch_with_logic(
+    *,
+    runtime: Settings,
+    rp: ResearchPair,
+    upload_items: list[tuple[str, bytes]],
+    questions: list[str],
+    rag_search_mode: RagSearchMode,
+    chunking_logic_id: str,
+    tokenizer_logic_id: str,
+    search_logic_id: str,
+    reranking_logic_id: str,
+    prompt_logic_id: str,
+    run_ragas: bool,
+    dataset_name: str | None,
+    top_k: int,
+) -> bytes:
+    split_fn = load_split_for_rag("chunking", chunking_logic_id)
+    tok_fn = load_tokenize_query("tokenizer", tokenizer_logic_id)
+    with ExitStack() as stack:
+        stack.enter_context(active_chunking_split(split_fn))
+        stack.enter_context(active_tokenizer(tok_fn))
+        rag_reset_collection(runtime)
+        ingest_rows = run_upload_items_batch(runtime, upload_items)
+        _raise_if_ingest_failed(ingest_rows)
 
+        try:
+            llm = get_chat_model(runtime)
+        except ValueError as e:
+            raise RuntimeError(str(e)) from e
 
-def _raise_if_ingest_failed(rows: list[dict[str, Any]]) -> None:
-    for r in rows:
-        if not r.get("ok"):
-            raise HTTPException(
-                status_code=400,
-                detail={"error": "ingest_failed", "source_name": r.get("source_name"), "message": r.get("error")},
+        rag_system_message = load_rag_system_message(prompt_logic_id)
+
+        fieldnames = experiment_csv_fieldnames(top_k)
+        buf = io.StringIO()
+        writer = csv.DictWriter(buf, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        spec_json = rp.spec_json_for_csv()
+        logic_meta: dict[str, str] = {
+            "research_pair_spec": spec_json,
+            "chunking_logic_id": chunking_logic_id,
+            "tokenizer_logic_id": tokenizer_logic_id,
+            "search_logic_id": search_logic_id,
+            "reranking_logic_id": reranking_logic_id,
+            "prompt_logic_id": prompt_logic_id,
+            "llm_model": runtime.llm_model,
+            "embedding_provider": runtime.embedding_provider,
+            "embedding_model": runtime.embedding_model,
+            "rag_search_mode": str(rag_search_mode),
+            "rag_hybrid_delegate": str(runtime.rag_hybrid_delegate),
+        }
+        for i, question in enumerate(questions):
+            row = _run_one_question(
+                runtime=runtime,
+                llm=llm,
+                index=i,
+                question=question,
+                logic_meta=logic_meta,
+                rag_mode=rag_search_mode,
+                search_logic_id=search_logic_id,
+                reranking_logic_id=reranking_logic_id,
+                rag_system_message=rag_system_message,
+                run_ragas=run_ragas,
+                research_pair_id=rp.research_pair_id,
+                document_set_id=rp.document_set_id.strip(),
+                dataset_name=dataset_name,
+                top_k=top_k,
             )
+            writer.writerow(row)
+        return buf.getvalue().encode("utf-8-sig")
+
+# -----------------------------------------------------------------------------
+# 1 問の実行
+# -----------------------------------------------------------------------------
 
 
 def _run_one_question(
+    *,
     runtime: Settings,
     llm: BaseChatModel,
     index: int,
     question: str,
     logic_meta: dict[str, str],
     rag_mode: RagSearchMode,
+    search_logic_id: str,
+    reranking_logic_id: str,
+    rag_system_message: str,
     run_ragas: bool,
+    research_pair_id: str,
+    document_set_id: str,
+    dataset_name: str | None,
+    top_k: int,
 ) -> dict[str, object]:
     t0 = time.monotonic()
-    chunks = search_documents(runtime, question, top_k=None, rag_search_mode=rag_mode)
+    chunks = call_retrieve(
+        "search",
+        search_logic_id,
+        runtime,
+        question,
+        top_k=top_k,
+        rag_search_mode=rag_mode,
+    )
+    chunks = call_rerank("reranking", reranking_logic_id, runtime, question, chunks)
+    chunks = chunks[:top_k]
     t1 = time.monotonic()
     rag_ms = (t1 - t0) * 1000.0
     contexts = [c.chunk_text for c in chunks]
-    ragas_score = ""
+    ragas_faith = ""
+    ragas_relev = ""
+    base_row: dict[str, object] = {
+        "research_pair_id": research_pair_id,
+        "question_index": index,
+        "document_set_id": document_set_id,
+        "dataset_name": dataset_name or "",
+        "input": question,
+        "rag_latency_ms": f"{rag_ms:.3f}",
+        "top_k": top_k,
+        "ragas_faithfulness": ragas_faith,
+        "ragas_answer_relevancy": ragas_relev,
+        **logic_meta,
+    }
+    for k in range(1, top_k + 1):
+        base_row[f"retrieved_source_{k}"] = ""
+        base_row[f"retrieved_chunk_id_{k}"] = ""
+        base_row[f"retrieved_distance_{k}"] = ""
+        base_row[f"retrieved_text_{k}"] = ""
+    for idx, c in enumerate(chunks):
+        n = idx + 1
+        base_row[f"retrieved_source_{n}"] = c.source
+        base_row[f"retrieved_chunk_id_{n}"] = c.chunk_id
+        base_row[f"retrieved_distance_{n}"] = distance_cell(c)
+        base_row[f"retrieved_text_{n}"] = snippet_cell(c.chunk_text)
+
     if not chunks:
         total_ms = rag_ms
-        if run_ragas:
-            ragas_score = ""
-        return {
-            "index": index,
-            "input": question,
-            "output": RAG_NO_DOCUMENTS_REPLY,
-            "rag_latency_ms": f"{rag_ms:.3f}",
-            "total_latency_ms": f"{total_ms:.3f}",
-            "search_results": "",
-            "vector_distances": "",
-            "prompt": "",
-            "ragas_faithfulness": ragas_score,
-            **logic_meta,
-        }
+        base_row["output"] = RAG_NO_DOCUMENTS_REPLY
+        base_row["total_latency_ms"] = f"{total_ms:.3f}"
+        base_row["prompt"] = ""
+        return base_row
+
     user_augmented = build_rag_user_message(question, chunks)
     messages = [
-        {"role": "system", "content": RAG_SYSTEM_MESSAGE},
+        {"role": "system", "content": rag_system_message},
         {"role": "user", "content": user_augmented},
     ]
     prompt_text = _format_prompt(messages)
@@ -151,25 +248,57 @@ def _run_one_question(
     t3 = time.monotonic()
     total_ms = (t3 - t0) * 1000.0
     if run_ragas:
-        ragas_score = run_ragas_faithfulness_row(
+        ragas_faith, ragas_relev = run_ragas_row_metrics(
             runtime,
             user_input=question,
             response=answer,
             retrieved_contexts=contexts,
             row_index=index,
         )
-    return {
-        "index": index,
-        "input": question,
-        "output": answer,
-        "rag_latency_ms": f"{rag_ms:.3f}",
-        "total_latency_ms": f"{total_ms:.3f}",
-        "search_results": chunks_to_context_lines(chunks),
-        "vector_distances": _format_vector_distances(chunks),
-        "prompt": prompt_text,
-        "ragas_faithfulness": ragas_score,
-        **logic_meta,
-    }
+        base_row["ragas_faithfulness"] = ragas_faith
+        base_row["ragas_answer_relevancy"] = ragas_relev
+
+    base_row["output"] = answer
+    base_row["total_latency_ms"] = f"{total_ms:.3f}"
+    base_row["prompt"] = prompt_text
+    return base_row
+
+# -----------------------------------------------------------------------------
+# 補助
+# -----------------------------------------------------------------------------
+
+
+def _runtime_from_research_pair(base: Settings, rp: ResearchPair) -> Settings:
+    patch: dict[str, object] = {}
+    if rp.llm_model is not None:
+        patch["llm_model"] = rp.llm_model
+    if rp.llm_api_base_url is not None:
+        patch["llm_api_base_url"] = rp.llm_api_base_url
+    if rp.llm_temperature is not None:
+        patch["llm_temperature"] = rp.llm_temperature
+    if rp.llm_request_timeout_seconds is not None:
+        patch["llm_request_timeout_seconds"] = rp.llm_request_timeout_seconds
+
+    if rp.embedding_provider is not None:
+        patch["embedding_provider"] = rp.embedding_provider
+    if rp.embedding_base_url is not None:
+        patch["embedding_base_url"] = rp.embedding_base_url
+    if rp.embedding_model is not None:
+        patch["embedding_model"] = rp.embedding_model
+
+    if rp.rag_hybrid_delegate is not None:
+        patch["rag_hybrid_delegate"] = rp.rag_hybrid_delegate
+
+    patch["rag_vector_top_k"] = rp.top_k
+    patch["rag_top_k"] = rp.top_k
+
+    return base.model_copy(update=patch)
+
+
+def _raise_if_ingest_failed(rows: list[dict[str, Any]]) -> None:
+    for r in rows:
+        if not r.get("ok"):
+            raise ExperimentIngestError("ingest_failed", rows)
 
 
 def _format_prompt(messages: list[dict[str, str]]) -> str:
@@ -177,11 +306,3 @@ def _format_prompt(messages: list[dict[str, str]]) -> str:
     for m in messages:
         parts.append(f"### {m['role']}\n{m.get('content', '')}")
     return "\n\n".join(parts)
-
-
-def _format_vector_distances(chunks: list[RetrievedChunk]) -> str:
-    pairs: list[str] = []
-    for c in chunks:
-        if c.vector_score_raw is not None:
-            pairs.append(f"{c.chunk_id}:{float(c.vector_score_raw):.8g}")
-    return "|".join(pairs)

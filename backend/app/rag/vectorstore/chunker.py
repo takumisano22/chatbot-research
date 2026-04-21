@@ -4,12 +4,12 @@ import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 
-from app.rag.logic.chunking import split_for_rag
+from app.rag.logic.experiment_context import get_split_for_rag
 
 # -----------------------------------------------------------------------------
 # 役割: 全文をチャンクに分割し、ストア投入用メタデータ（doc_id / chunk_id / document_lower）を付与する。
 # 主な呼び出し元: ingest_pipeline.runner、取り込み処理全般。
-# 流れ: normalize 済み全文 → logic.chunking.split_for_rag → ChunkForStore 列。
+# 流れ: normalize 済み全文 → experiment_context.get_split_for_rag → ChunkForStore 列。
 # -----------------------------------------------------------------------------
 
 
@@ -21,7 +21,7 @@ def build_chunks_for_source(
     chunk_overlap: int,
 ) -> list[ChunkForStore]:
     doc_id = _stable_doc_id(repo_relative_source)
-    pieces = split_for_rag(
+    pieces = get_split_for_rag()(
         text=full_text,
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
