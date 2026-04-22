@@ -1,0 +1,14 @@
+name: Run test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  run-test:
+    runs-on: [self-hosted, windows]
+    steps:
+      - name: test
+        shell: powershell
+        run: | 
+          docker compose build
+          docker compose run --rm experiment_runner --research-pair RP-test-0001

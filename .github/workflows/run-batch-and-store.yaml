@@ -1,0 +1,60 @@
+name: Run batch and store
+
+on:
+  workflow_dispatch:
+    inputs:
+      pair_file:
+        description: "実行する pair ファイル名"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  run-batch:
+    runs-on: [self-hosted, windows]
+    steps:
+      - name: Checkout repo 1
+        uses: actions/checkout@v4
+
+      - name: Run batch app
+        shell: powershell
+        run: |
+          docker compose build
+          docker compose run --rm experiment_runner --research-pair "${{ inputs.pair_file }}"
+
+      - name: Upload batch csv
+        uses: actions/upload-artifact@v4
+        with:
+          name: batch-csv
+          path: output/*.csv
+          retention-days: 7
+
+  stage-to-grader:
+    needs: run-batch
+    runs-on: [self-hosted, windows]
+    steps:
+      - name: Download batch csv
+        uses: actions/download-artifact@v5
+        with:
+          name: batch-csv
+          path: temp_csv
+
+      - name: Checkout repo 2
+        uses: actions/checkout@v4
+        with:
+          repository: owner/repo-grader
+          token: ${{ secrets.REPO2_READ_TOKEN }}
+          path: repo-grader
+
+      - name: Copy csv into grader input
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force -Path "repo-grader\input\incoming" | Out-Null
+          Copy-Item "temp_csv\*.csv" "repo-grader\input\incoming\" -Force
+
+      - name: Show copied files
+        shell: powershell
+        run: |
+          Get-ChildItem "repo-grader\input\incoming"
