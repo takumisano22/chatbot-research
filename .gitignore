@@ -5,6 +5,10 @@
 .env.local
 .env.*.local
 
+<<<<<<< HEAD
+=======
+
+>>>>>>> e4b8e37c36cd114ecdcd524792c019bc562036a9
 
 # --- エディタ・ローカル AI ---
 .cursor/
