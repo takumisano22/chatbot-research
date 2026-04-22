@@ -1,5 +1,5 @@
 # サンプル research_pair。実行前に qa_datasets / ingest_document を実データで埋めてください。
-research_pair_id: RP-0002
+research_pair_id: RP-test-0002
 llm_model: llama3.2
 embedding_provider: ruri_http
 embedding_base_url: http://host.docker.internal:8010
