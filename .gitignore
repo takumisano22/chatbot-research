@@ -5,9 +5,6 @@
 .env.local
 .env.*.local
 
-# --- 実験出力（ディレクトリは残し中身のみ無視）---
-outputs/*
-!outputs/.gitkeep
 
 # --- エディタ・ローカル AI ---
 .cursor/

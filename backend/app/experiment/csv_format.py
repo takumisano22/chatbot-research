@@ -17,6 +17,7 @@ def experiment_csv_fieldnames(top_k: int) -> list[str]:
         "document_set_id",
         "dataset_name",
         "input",
+        "llm_user_prompt",
         "output",
         "rag_latency_ms",
         "total_latency_ms",

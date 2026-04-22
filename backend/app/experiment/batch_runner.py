@@ -212,6 +212,7 @@ def _run_one_question(
         "document_set_id": document_set_id,
         "dataset_name": dataset_name or "",
         "input": question,
+        "llm_user_prompt": "",
         "rag_latency_ms": f"{rag_ms:.3f}",
         "top_k": top_k,
         "ragas_faithfulness": ragas_faith,
@@ -237,6 +238,7 @@ def _run_one_question(
         return base_row
 
     user_augmented = build_rag_user_message(question, chunks)
+    base_row["llm_user_prompt"] = user_augmented
     messages = [
         {"role": "system", "content": rag_system_message},
         {"role": "user", "content": user_augmented},
