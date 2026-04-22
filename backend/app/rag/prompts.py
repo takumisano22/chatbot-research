@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from app.experiment.logic_registry import load_rag_system_message
 from app.rag.schemas import RetrievedChunk
 
 # -----------------------------------------------------------------------------
@@ -10,13 +9,6 @@ from app.rag.schemas import RetrievedChunk
 # -----------------------------------------------------------------------------
 
 RAG_NO_DOCUMENTS_REPLY = "参照ドキュメントから該当箇所が見つかりませんでした。"
-
-
-def rag_system_message_for_logic(logic_id: str) -> str:
-    return load_rag_system_message(logic_id)
-
-
-RAG_SYSTEM_MESSAGE = rag_system_message_for_logic("logic_01")
 
 
 def build_rag_user_message(question: str, chunks: list[RetrievedChunk]) -> str:
