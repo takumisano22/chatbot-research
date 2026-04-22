@@ -33,7 +33,7 @@ class ResearchPair(BaseModel):
     chunking_logic_id: str = Field(..., min_length=1)
     reranking_logic_id: str = Field(..., min_length=1)
     tokenizer_logic_id: str = Field(..., min_length=1)
-    prompt_id: str = Field(..., min_length=1)
+    prompt_logic_id: str = Field(..., min_length=1)
 
     top_k: int = Field(..., ge=1, le=500)
     qa_dataset: str = Field(
@@ -43,6 +43,8 @@ class ResearchPair(BaseModel):
     )
     document_set_id: str = Field(..., min_length=1)
     ragas_enabled: bool = False
+    # None: .env の LANGFUSE_ENABLED を継承。True/False で実験単位に上書き。
+    langfuse_enabled: bool | None = None
     rag_hybrid_delegate: Literal["vector_search", "keyword_search"] | None = None
 
     @field_validator(
@@ -50,7 +52,7 @@ class ResearchPair(BaseModel):
         "chunking_logic_id",
         "reranking_logic_id",
         "tokenizer_logic_id",
-        "prompt_id",
+        "prompt_logic_id",
     )
     @classmethod
     def _logic_id_fmt(cls, v: str) -> str:
@@ -89,11 +91,12 @@ class ResearchPair(BaseModel):
             "chunking_logic_id": self.chunking_logic_id,
             "reranking_logic_id": self.reranking_logic_id,
             "tokenizer_logic_id": self.tokenizer_logic_id,
-            "prompt_id": self.prompt_id,
+            "prompt_logic_id": self.prompt_logic_id,
             "top_k": self.top_k,
             "qa_dataset": self.qa_dataset,
             "document_set_id": self.document_set_id,
             "ragas_enabled": self.ragas_enabled,
+            "langfuse_enabled": self.langfuse_enabled,
         }
         return json.dumps(d, ensure_ascii=False, sort_keys=True)
 

@@ -25,7 +25,7 @@ def experiment_csv_fieldnames(top_k: int) -> list[str]:
         "tokenizer_logic_id",
         "search_logic_id",
         "reranking_logic_id",
-        "prompt_id",
+        "prompt_logic_id",
         "llm_model",
         "embedding_provider",
         "embedding_model",

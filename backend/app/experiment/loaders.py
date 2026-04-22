@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -16,7 +15,6 @@ from app.core.config import Settings
 class QaDatasetItem(BaseModel):
     question: str = Field(..., min_length=1)
     reference_answer: str | None = None
-    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class QaDatasetFile(BaseModel):

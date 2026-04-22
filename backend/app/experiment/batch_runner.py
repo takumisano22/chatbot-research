@@ -29,6 +29,7 @@ from app.experiment.research_pair_schema import ResearchPair
 from app.rag.ingest_batch import run_upload_items_batch
 from app.rag.logic.experiment_context import active_chunking_split, active_tokenizer
 from app.rag.prompts import RAG_NO_DOCUMENTS_REPLY, build_rag_user_message
+from app.langfuse.tracer import observe_llm_chat_turn
 from app.rag.vectorstore.vector_db import rag_reset_collection
 from app.services.chat_service import run_chat
 from app.services.llm_factory import get_chat_model
@@ -54,13 +55,13 @@ def preflight_logic(
     tokenizer_logic_id: str,
     search_logic_id: str,
     reranking_logic_id: str,
-    prompt_id: str,
+    prompt_logic_id: str,
 ) -> None:
     load_split_for_rag("chunking", chunking_logic_id)
     load_tokenize_query("tokenizer", tokenizer_logic_id)
     load_retrieve_fn("search", search_logic_id)
     load_rerank_fn("reranking", reranking_logic_id)
-    _ = load_rag_system_message(prompt_id)
+    _ = load_rag_system_message(prompt_logic_id)
 
 
 def run_research_pair_batch_bytes(
@@ -75,7 +76,7 @@ def run_research_pair_batch_bytes(
         tokenizer_logic_id=rp.tokenizer_logic_id,
         search_logic_id=rp.search_logic_id,
         reranking_logic_id=rp.reranking_logic_id,
-        prompt_id=rp.prompt_id,
+        prompt_logic_id=rp.prompt_logic_id,
     )
     base = get_settings()
     runtime = _runtime_from_research_pair(base, rp)
@@ -88,7 +89,7 @@ def run_research_pair_batch_bytes(
         tokenizer_logic_id=rp.tokenizer_logic_id,
         search_logic_id=rp.search_logic_id,
         reranking_logic_id=rp.reranking_logic_id,
-        prompt_id=rp.prompt_id,
+        prompt_logic_id=rp.prompt_logic_id,
         run_ragas=rp.ragas_enabled,
         dataset_name=dataset_name,
         top_k=int(rp.top_k),
@@ -109,7 +110,7 @@ def _run_batch_with_logic(
     tokenizer_logic_id: str,
     search_logic_id: str,
     reranking_logic_id: str,
-    prompt_id: str,
+    prompt_logic_id: str,
     run_ragas: bool,
     dataset_name: str | None,
     top_k: int,
@@ -128,7 +129,7 @@ def _run_batch_with_logic(
         except ValueError as e:
             raise RuntimeError(str(e)) from e
 
-        rag_system_message = load_rag_system_message(prompt_id)
+        rag_system_message = load_rag_system_message(prompt_logic_id)
 
         fieldnames = experiment_csv_fieldnames(top_k)
         buf = io.StringIO()
@@ -141,7 +142,7 @@ def _run_batch_with_logic(
             "tokenizer_logic_id": tokenizer_logic_id,
             "search_logic_id": search_logic_id,
             "reranking_logic_id": reranking_logic_id,
-            "prompt_id": prompt_id,
+            "prompt_logic_id": prompt_logic_id,
             "llm_model": runtime.llm_model,
             "embedding_provider": runtime.embedding_provider,
             "embedding_model": runtime.embedding_model,
@@ -240,7 +241,7 @@ def _run_one_question(
         {"role": "system", "content": rag_system_message},
         {"role": "user", "content": user_augmented},
     ]
-    answer = run_chat(llm, messages)
+    answer = observe_llm_chat_turn(runtime, messages, lambda: run_chat(llm, messages))
     t3 = time.monotonic()
     total_ms = (t3 - t0) * 1000.0
     if run_ragas:
@@ -283,6 +284,9 @@ def _runtime_from_research_pair(base: Settings, rp: ResearchPair) -> Settings:
 
     if rp.rag_hybrid_delegate is not None:
         patch["rag_hybrid_delegate"] = rp.rag_hybrid_delegate
+
+    if rp.langfuse_enabled is not None:
+        patch["langfuse_enabled"] = rp.langfuse_enabled
 
     patch["rag_vector_top_k"] = rp.top_k
     patch["rag_top_k"] = rp.top_k

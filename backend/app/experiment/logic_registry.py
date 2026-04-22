@@ -18,7 +18,7 @@ _LISTED_LOGIC_IDS: dict[str, tuple[str, ...]] = {
     "tokenizer_logic_ids": ("logic_01",),
     "search_logic_ids": ("logic_01", "logic_02"),
     "reranking_logic_ids": ("logic_01",),
-    "prompt_ids": ("logic_01",),
+    "prompt_logic_ids": ("logic_01",),
 }
 
 

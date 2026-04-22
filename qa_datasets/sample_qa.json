@@ -3,13 +3,11 @@
   "items": [
     {
       "question": "この文書セットの主題は何ですか？",
-      "reference_answer": null,
-      "metadata": {}
+      "reference_answer": null
     },
     {
       "question": "有給休暇は何日ですか？",
-      "reference_answer": null,
-      "metadata": {}
+      "reference_answer": null
     }
   ]
 }

@@ -99,6 +99,45 @@ def observe_vector_store_query(
         safe_flush(client)
 
 
+def observe_llm_chat_turn(
+    settings: Settings,
+    messages: list[dict[str, str]],
+    run: Callable[[], str],
+) -> str:
+    """実験バッチの 1 往復チャットを Langfuse に載せる。無効時は run のみ（オーバーヘッド最小）。"""
+    client = get_langfuse_client(settings)
+    if client is None:
+        return run()
+    meta = build_common_metadata(settings, use_rag=True)
+    input_payload = {
+        "messages": [
+            {
+                "role": (m.get("role") or ""),
+                "content": truncate_for_observation(str(m.get("content", ""))),
+            }
+            for m in messages
+        ]
+    }
+    try:
+        cm = client.start_as_current_observation(
+            name="rag.llm_chat",
+            as_type="generation",
+            input=input_payload,
+            metadata={**meta, "llm_model": settings.llm_model},
+            model=settings.llm_model,
+        )
+    except Exception:
+        logger.exception("Langfuse rag.llm_chat に失敗しました（観測をスキップします）")
+        return run()
+    try:
+        with cm as span:
+            text = run()
+            safe_span_update(span, output={"answer": truncate_for_observation(text)})
+            return text
+    finally:
+        safe_flush(client)
+
+
 def observe_keyword_retrieval(
     settings: Settings,
     query: str,

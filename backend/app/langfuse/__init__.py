@@ -10,6 +10,7 @@ from app.langfuse.metadata import (
 )
 from app.langfuse.tracer import (
     observe_keyword_retrieval,
+    observe_llm_chat_turn,
     observe_vector_store_query,
     observe_vector_query_embedding,
     safe_span_update,
@@ -19,6 +20,7 @@ __all__ = [
     "build_common_metadata",
     "get_langfuse_client",
     "observe_keyword_retrieval",
+    "observe_llm_chat_turn",
     "observe_vector_store_query",
     "observe_vector_query_embedding",
     "safe_flush",
