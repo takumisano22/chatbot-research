@@ -1,0 +1,32 @@
+name: Test self-hosted runner
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test-runner:
+    runs-on: [self-hosted, windows]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show basic info
+        shell: powershell
+        run: |
+          Write-Host "Runner OK"
+          hostname
+          Get-Date
+          Get-Location
+
+      - name: Create test file
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force -Path output | Out-Null
+          "hello from self-hosted runner" | Out-File -FilePath output\test.txt -Encoding utf8
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: selfhosted-test-output
+          path: output/test.txt
