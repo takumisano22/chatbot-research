@@ -12,18 +12,18 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Show basic info
-        shell: powershell
+        shell: cmd
         run: |
-          Write-Host "Runner OK"
+          echo Runner OK
           hostname
-          Get-Date
-          Get-Location
+          echo %DATE% %TIME%
+          cd
 
       - name: Create test file
-        shell: powershell
+        shell: cmd
         run: |
-          New-Item -ItemType Directory -Force -Path output | Out-Null
-          "hello from self-hosted runner" | Out-File -FilePath output\test.txt -Encoding utf8
+          if not exist output mkdir output
+          echo hello from self-hosted runner > output\test.txt
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
