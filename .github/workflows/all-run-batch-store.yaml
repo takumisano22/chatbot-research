@@ -26,11 +26,6 @@ jobs:
         run: |
           copy C:\actions-runner\_secrets\chatbot-research\.env .env
 
-      - name: Ensure executed file exists
-        shell: cmd
-        run: |
-          if not exist research_pairs\executed_log\executed_pairs.txt type nul > research_pairs\executed_log\executed_pairs.txt
-
       - name: Run batch
         shell: cmd
         run: |
