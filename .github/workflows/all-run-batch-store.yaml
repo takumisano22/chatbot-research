@@ -31,14 +31,14 @@ jobs:
         run: |
           docker compose build
           for %%F in (research_pairs\*.yaml) do (
-          findstr /x /c:"%%~nxF" research_pairs\executed_log\executed_pairs.md >nul
+          findstr /x /c:"%%~nxF" research_pairs\executed_log\executed_pairs.txt >nul
           if errorlevel 1 (
             echo runbatch %%~nxF
             docker compose run --rm experiment_runner --research-pair %%~nF
             if not errorlevel 1 (
             if not exist chatbot-scoring\input\csv mkdir chatbot-scoring\input\csv
             copy outputs\%%~nF*.csv chatbot-scoring\input\csv\
-            echo %%~nxF >> research_pairs\executed_log\executed_pairs.md
+            echo %%~nxF >> research_pairs\executed_log\executed_pairs.txt
             ) else (
               echo Failed: %%~nxF
               exit /b 1
