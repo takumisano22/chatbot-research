@@ -11,6 +11,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Copy .env
+        shell: cmd
+        run: |
+          copy C:\actions-runner\_secrets\chatbot-research\.env .env
+
       - name: Run batch
         shell: cmd
         run: |
