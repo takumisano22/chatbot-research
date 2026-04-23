@@ -42,7 +42,7 @@ jobs:
       - name: commit and push to scoring
         shell: cmd
         run: |
-          git config --global --add safe.directory "%GITHUB_WORKSPACE%\chatbot-scoring"
+          git config --global --add safe.directory "C:\actions-runner\_work\chatbot-research\chatbot-research\chatbot-scoring"
           cd chatbot-scoring
           git config user.name "GitHub Actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
