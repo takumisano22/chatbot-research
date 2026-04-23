@@ -1,0 +1,73 @@
+name: All-run-batch-store
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  batch-runner:
+    runs-on: [self-hosted, windows]
+
+    steps:
+      - name: Checkout repo research
+        uses: actions/checkout@v4
+
+      - name: Checkout repo scoring
+        uses: actions/checkout@v4
+        with:
+          repository: takumisano22/chatbot-scoring
+          token: ${{ secrets.SCORING_WRITE_TOKEN }}
+          path: chatbot-scoring
+
+      - name: Copy .env
+        shell: cmd
+        run: |
+          copy C:\actions-runner\_secrets\chatbot-research\.env .env
+
+      - name: Ensure executed file exists
+        shell: cmd
+        run: |
+          if not exist research_pairs\executed_log\executed_pairs.txt type nul > research_pairs\executed_log\executed_pairs.txt
+
+      - name: Run batch
+        shell: cmd
+        run: |
+          docker compose build
+          for %%F in (research_pairs\*.yaml) do (
+          findstr /x /c:"%%~nxF" research_pairs\executed_log\executed_pairs.txt >nul
+          if errorlevel 1 (
+            echo runbatch %%~nxF
+            docker compose run --rm experiment_runner --research-pair %%~nF
+            if not errorlevel 1 (
+            if not exist chatbot-scoring\input\csv mkdir chatbot-scoring\input\csv
+            copy outputs\%%~nF*.csv chatbot-scoring\input\csv\
+            echo %%~nxF >> research_pairs\executed_log\executed_pairs.txt
+            ) else (
+              echo Failed: %%~nxF
+              exit /b 1
+            )
+          )
+          )
+      
+      - name: commit and push to research
+        shell: cmd
+        run: |
+          git config --global --add safe.directory "C:\actions-runner\_work\chatbot-research\chatbot-research"
+          git config user.name "GitHub Actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add research_pairs/executed_log/executed_pairs.txt
+          git commit -m "Add executed pairs" || echo "No changes to commit"
+          git push
+      
+      - name: commit and push to scoring
+        shell: cmd
+        run: |
+          git config --global --add safe.directory "C:\actions-runner\_work\chatbot-research\chatbot-research\chatbot-scoring"
+          cd chatbot-scoring
+          git config user.name "GitHub Actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add input/csv/
+          git commit -m "Add batch output" || echo "No changes to commit"
+          git push
