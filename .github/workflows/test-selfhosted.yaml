@@ -37,7 +37,7 @@ jobs:
       - name: Copy csv to scoring
         shell: cmd
         run: |
-          copy outputs/${{ inputs.pair_file }}*.csv chatbot-scoring/input/csv/
+          copy outputs\${{ inputs.pair_file }}*.csv chatbot-scoring\input\csv\
       
       - name: commit and push to scoring
         shell: cmd
