@@ -2,7 +2,8 @@ from __future__ import annotations
 
 # 研究ペア単位で Chroma リセット・取り込み・検索・再ランク・LLM・（任意）RAGAS を行い CSV を返す。
 # runtime Settings は research_pair から 1 回だけ構築し、全問で同一コレクションを使う。
-# QA ごとに stdout へ進捗（%）を出す（# で始まる行。ingest・モデル初期化は含まない。runner の最終行は CSV パス）。
+# 取り込み（Chroma）: ファイル数に対する n/total（%）を # experiment ingest progress で stdout/stderr に出す。
+# QA ごとに stdout へ進捗（%）を出す（# experiment progress。ingest 以外のフェーズ・モデル初期化は含まない。runner の最終行は CSV パス）。
 
 import csv
 import io
@@ -121,7 +122,7 @@ def _run_batch_with_logic(
         stack.enter_context(active_chunking_split(split_fn))
         stack.enter_context(active_tokenizer(tok_fn))
         rag_reset_collection(runtime)
-        ingest_rows = run_upload_items_batch(runtime, upload_items)
+        ingest_rows = run_upload_items_batch(runtime, upload_items, research_pair_id=rp.research_pair_id)
         _raise_if_ingest_failed(ingest_rows)
 
         try:

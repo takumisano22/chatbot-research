@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -15,15 +16,26 @@ logger = logging.getLogger(__name__)
 # -----------------------------------------------------------------------------
 # 役割: DB を介さず (ファイル名, bytes) を順にベクトルストアへ書き込む（実験バッチ専用）。
 # 流れ: rag_write_session → 拡張子ごとに convert → ingest_plain_text。
+# research_pair_id 指定時はファイル単位で stdout（# 行）/ stderr に進捗を出す（Chroma 書き込みの可視化）。
 # -----------------------------------------------------------------------------
 
 
-def run_upload_items_batch(settings: Settings, items: list[tuple[str, bytes]]) -> list[dict[str, Any]]:
+def run_upload_items_batch(
+    settings: Settings,
+    items: list[tuple[str, bytes]],
+    *,
+    research_pair_id: str | None = None,
+) -> list[dict[str, Any]]:
     session = rag_write_session(settings)
     out: list[dict[str, Any]] = []
-    for name, data in items:
+    total = len(items)
+    if research_pair_id is not None and total == 0:
+        _emit_ingest_progress(0, 0, research_pair_id)
+    for i, (name, data) in enumerate(items):
         sn, ok, err, n = _ingest_single_upload(settings, session, name, data)
         out.append({"source_name": sn, "ok": ok, "error": err, "chunks_written": n})
+        if research_pair_id is not None:
+            _emit_ingest_progress(i + 1, total, research_pair_id)
     return out
 
 
@@ -99,3 +111,21 @@ def _ingest_one_with_policy(
         logger.exception("取り込み失敗: %s", safe_name)
         return safe_name, False, str(e), 0
     return safe_name, True, None, n
+
+
+# -----------------------------------------------------------------------------
+# 補助（バッチ実行時の進捗表示。QA 進捗と同様に # 行で stdout にも出す）
+# -----------------------------------------------------------------------------
+
+
+def _emit_ingest_progress(done: int, total: int, research_pair_id: str) -> None:
+    ## Docker ログで拾いやすいよう stdout（# 行）と stderr の両方へ出す（batch_runner._emit_qa_progress と同趣旨）。
+    if total <= 0:
+        msg = f"[{research_pair_id}] 取り込み進捗: ファイル 0 件（データなし）"
+        print(f"# experiment ingest progress: {msg}", flush=True)
+        print(msg, file=sys.stderr, flush=True)
+        return
+    pct = 100.0 * done / total
+    msg = f"[{research_pair_id}] 取り込み進捗: {done}/{total} ({pct:.1f}%)"
+    print(f"# experiment ingest progress: {msg}", flush=True)
+    print(msg, file=sys.stderr, flush=True)
