@@ -1,3 +1,6 @@
 executed_log/executed_pairs.txt
 
-RP-test-0001.yaml
+RP-test-0001.yamlRP-test-0001.yaml 
+RP-test-0002.yaml 
+RP-test-0003.yaml 
+RP-test-0004.yaml 
