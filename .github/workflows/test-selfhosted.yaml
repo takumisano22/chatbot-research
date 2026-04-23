@@ -11,22 +11,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Show basic info
+      - name: Run batch
         shell: cmd
         run: |
-          echo Runner OK
-          hostname
-          echo %DATE% %TIME%
-          cd
+          docker compose build
+          docker compose run --rm experiment_runner --research-pair RP-test-0001
 
-      - name: Create test file
-        shell: cmd
-        run: |
-          if not exist output mkdir output
-          echo hello from self-hosted runner > output\test.txt
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: selfhosted-test-output
-          path: output/test.txt
+          name: selfhosted-test-outputs
+          path: outputs/RP-test-0001*.csv
