@@ -9,7 +9,7 @@ on:
         type: string
 
 jobs:
-  test-runner:
+  batch-runner:
     runs-on: [self-hosted, windows]
 
     steps:
