@@ -69,3 +69,9 @@ jobs:
           git add input/csv/
           git commit -m "Add batch output" || echo "No changes to commit"
           git push
+
+      - name: Cleanup docker compose
+        if: always()
+        shell: cmd
+        run: |
+          docker compose stop
