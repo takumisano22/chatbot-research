@@ -4,8 +4,11 @@
 .env
 .env.local
 .env.*.local
+outputs/*.csv
+ingest_document/DOCSET-0001/*.pdf
 
 # --- エディタ・ローカル AI ---
+.claude/
 .cursor/
 .cursorignore
 agent-transcripts/
