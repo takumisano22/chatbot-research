@@ -10,16 +10,19 @@ on:
 
 jobs:
   batch-runner:
+    if: github.actor == 'takumisano22'
     runs-on: [self-hosted, windows]
 
     steps:
       - name: Checkout repo research
         uses: actions/checkout@v4
 
-      - name: Copy .env
+      - name: Copy .env and ingest_document
         shell: cmd
         run: |
           copy C:\actions-runner\_secrets\chatbot-research\.env .env
+          xcopy /E /I /Y C:\actions-runner\_secrets\chatbot-research\ingest_document\DOCSET-0001\* ingest_document\DOCSET-0001\
+          xcopy /E /I /Y C:\actions-runner\_secrets\chatbot-research\qa_datasets\* qa_datasets\
 
       - name: Run batch
         shell: cmd
@@ -30,7 +33,7 @@ jobs:
       - name: Checkout repo scoring
         uses: actions/checkout@v4
         with:
-          repository: takumisano22/chatbot-scoring
+          repository: ${{ vars.SCORING_REPOSITORY }}
           token: ${{ secrets.SCORING_WRITE_TOKEN }}
           path: chatbot-scoring
 
