@@ -44,6 +44,7 @@ class RagWriteSession:
                 source=c.source,
                 chunk_text=c.chunk_text,
                 document_lower=c.document_lower,
+                metadata=c.metadata,
             )
             for c in chunks
         ]
@@ -144,6 +145,8 @@ def _vector_hits_to_retrieved_chunks(hits: list[Any]) -> list[RetrievedChunk]:
     norms = _min_max_normalize(sims)
     out: list[RetrievedChunk] = []
     for h, norm in zip(hits, norms, strict=True):
+        # adapter 側 (VectorSearchHit) が metadata を持たない実装でも壊れないように getattr で取り出す。
+        meta_raw = getattr(h, "metadata", None) or {}
         out.append(
             RetrievedChunk(
                 doc_id=str(getattr(h, "doc_id", "")),
@@ -156,6 +159,7 @@ def _vector_hits_to_retrieved_chunks(hits: list[Any]) -> list[RetrievedChunk]:
                 vector_score_norm=norm,
                 final_score=norm,
                 retrieval_type="vector",
+                metadata=dict(meta_raw),
             )
         )
     return out

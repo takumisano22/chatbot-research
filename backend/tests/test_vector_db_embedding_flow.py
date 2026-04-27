@@ -25,12 +25,14 @@ def test_rag_write_session_add_chunks_passes_embeddings(monkeypatch) -> None:
                 source: str,
                 chunk_text: str,
                 document_lower: str,
+                metadata: dict | None = None,
             ) -> None:
                 self.chunk_id = chunk_id
                 self.doc_id = doc_id
                 self.source = source
                 self.chunk_text = chunk_text
                 self.document_lower = document_lower
+                self.metadata = metadata or {}
 
         class VectorStoreConfig:
             def __init__(self, **kwargs) -> None:
@@ -101,12 +103,14 @@ def test_rag_write_session_retries_after_dimension_mismatch(monkeypatch) -> None
                 source: str,
                 chunk_text: str,
                 document_lower: str,
+                metadata: dict | None = None,
             ) -> None:
                 self.chunk_id = chunk_id
                 self.doc_id = doc_id
                 self.source = source
                 self.chunk_text = chunk_text
                 self.document_lower = document_lower
+                self.metadata = metadata or {}
 
         class VectorStoreConfig:
             def __init__(self, **kwargs) -> None:

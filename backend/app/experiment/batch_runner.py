@@ -23,12 +23,17 @@ from app.experiment.logic_registry import (
     load_rerank_fn,
     load_retrieve_fn,
     load_split_for_rag,
+    load_split_for_rag_with_metadata,
     load_tokenize_query,
 )
 from app.experiment.ragas_eval import run_ragas_row_metrics
 from app.experiment.research_pair_schema import ResearchPair
 from app.rag.ingest_batch import run_upload_items_batch
-from app.rag.logic.experiment_context import active_chunking_split, active_tokenizer
+from app.rag.logic.experiment_context import (
+    active_chunking_split,
+    active_chunking_split_with_metadata,
+    active_tokenizer,
+)
 from app.rag.prompts import RAG_NO_DOCUMENTS_REPLY, build_rag_user_message
 from app.langfuse.tracer import observe_llm_chat_turn
 from app.rag.vectorstore.vector_db import rag_reset_collection
@@ -117,9 +122,13 @@ def _run_batch_with_logic(
     top_k: int,
 ) -> bytes:
     split_fn = load_split_for_rag("chunking", chunking_logic_id)
+    # ロジックが metadata 付きスプリッタを提供していれば一緒に差し替える。
+    # 未提供なら None を入れて chunker 側のフォールバック (テキストのみ経路) に確実に戻す。
+    split_with_meta_fn = load_split_for_rag_with_metadata("chunking", chunking_logic_id)
     tok_fn = load_tokenize_query("tokenizer", tokenizer_logic_id)
     with ExitStack() as stack:
         stack.enter_context(active_chunking_split(split_fn))
+        stack.enter_context(active_chunking_split_with_metadata(split_with_meta_fn))
         stack.enter_context(active_tokenizer(tok_fn))
         rag_reset_collection(runtime)
         ingest_rows = run_upload_items_batch(runtime, upload_items, research_pair_id=rp.research_pair_id)

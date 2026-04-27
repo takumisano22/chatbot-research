@@ -2,6 +2,7 @@
 # LangChain Chroma・chromadb のクエリ API はこのモジュールに閉じる。
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from chromadb.api.models.Collection import Collection
@@ -9,6 +10,12 @@ from chromadb.errors import NotFoundError
 
 from vectordb.chroma.config import ChunkRecord, VectorSearchHit, VectorStoreConfig
 from vectordb.chroma.client import get_rag_collection, get_vector_store_client
+
+# Chroma の metadatas で backend が必ず生成する予約キー。
+# ロジック由来 metadata に同名キーがあっても、これらの予約値で上書きする。
+_RESERVED_METADATA_KEYS: frozenset[str] = frozenset(
+    {"doc_id", "chunk_id", "source", "chunk_text"}
+)
 
 
 # -----------------------------------------------------------------------------
@@ -130,16 +137,36 @@ def _ids_documents_metadatas(
 ) -> tuple[list[str], list[str], list[dict[str, Any]]]:
     ids = [c.chunk_id for c in chunks]
     documents = [c.document_lower for c in chunks]
-    metadatas = [
-        {
-            "doc_id": c.doc_id,
-            "chunk_id": c.chunk_id,
-            "source": c.source,
-            "chunk_text": c.chunk_text,
-        }
-        for c in chunks
-    ]
+    metadatas: list[dict[str, Any]] = []
+    for c in chunks:
+        # ロジック由来 metadata を Chroma 制約に合わせて平坦化してから、
+        # 予約キー (固定 4 キー) で上書きする。
+        meta = _flatten_for_chroma(c.metadata or {})
+        meta["doc_id"] = c.doc_id
+        meta["chunk_id"] = c.chunk_id
+        meta["source"] = c.source
+        meta["chunk_text"] = c.chunk_text
+        metadatas.append(meta)
     return ids, documents, metadatas
+
+
+def _flatten_for_chroma(metadata: dict[str, Any]) -> dict[str, Any]:
+    """Chroma の metadata 制約 (str/int/float/bool のスカラのみ) に合わせて平坦化する。
+
+    方針:
+      - 値が dict / list / tuple のキーは JSON 文字列化して保持する
+      - None は除外する
+      - それ以外 (str/int/float/bool) はそのまま保持する
+    """
+    flat: dict[str, Any] = {}
+    for k, v in metadata.items():
+        if v is None:
+            continue
+        if isinstance(v, (dict, list, tuple)):
+            flat[k] = json.dumps(v, ensure_ascii=False)
+        else:
+            flat[k] = v
+    return flat
 
 
 def _vector_hits_from_query_rows(rows: dict[str, Any]) -> list[VectorSearchHit]:
@@ -154,6 +181,9 @@ def _vector_hits_from_query_rows(rows: dict[str, Any]) -> list[VectorSearchHit]:
     out: list[VectorSearchHit] = []
     for metadata, document, distance in zip(metadatas, documents, distances):
         m = metadata if isinstance(metadata, dict) else {}
+        # 予約キー以外をロジック由来 metadata として復元する。
+        # JSON 文字列化された値は文字列のまま返す（必要なら呼び出し側で json.loads）。
+        custom_meta = {k: v for k, v in m.items() if k not in _RESERVED_METADATA_KEYS}
         out.append(
             VectorSearchHit(
                 doc_id=str(m.get("doc_id", "")),
@@ -161,6 +191,7 @@ def _vector_hits_from_query_rows(rows: dict[str, Any]) -> list[VectorSearchHit]:
                 source=str(m.get("source", "")),
                 chunk_text=str(m.get("chunk_text") or (document or "")),
                 distance=float(distance),
+                metadata=custom_meta,
             )
         )
     return out

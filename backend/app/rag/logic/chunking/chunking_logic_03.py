@@ -1,11 +1,3 @@
-"""
-chunking_logic_02.py — Structure Aware Chunker
-
-文書全体の見出し分布・包含関係・連続性を解析し、
-親子構造付きチャンクを生成する。
-
-CLI: python chunking_logic_02.py input.txt --out chunks.json [--debug] [--print-tree]
-"""
 from __future__ import annotations
 
 import argparse
@@ -15,8 +7,15 @@ import math
 import re
 import statistics
 from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
+
+# Metadata builder のシグネチャ。
+# default_metadata_builder と互換のキーワード引数を受け取り dict を返す。
+# chunker.py 等で独自フィールドを足したい場合は、このシグネチャに準拠した
+# 関数を flatten_chunks() / split_for_rag_structure_aware() に渡す。
+MetadataBuilder = Callable[..., dict[str, Any]]
 
 # ============================================================
 # 主要処理フロー（呼び出し関係）
@@ -35,9 +34,11 @@ from typing import Any
 #    -> build_section_tree()
 #       -> _candidate_confidence()
 #       -> _add_paragraph_fallback()  # 見出し無し時のみ
-#    -> flatten_chunks()              # 子ノード境界分割 & 均等チャンク化 (structure_aware_v2)
-#       -> _split_text_evenly()       # 超過テキストの均等分割
-#       -> _group_items_balanced()    # 子ノードの均等グループ化
+#    -> flatten_chunks(metadata_builder=...)  # 親(章)/子(条) チャンク生成 (structure_aware_v4)
+#       -> default_metadata_builder() # 既定の metadata 生成 (差し替え可)
+#       -> _has_multiline_body()      # 条本文が複数行か判定 (子チャンク採否)
+#       -> _group_items_balanced()    # 親チャンクの子境界均等分割
+#       -> _split_text_evenly()       # 子チャンク超過時のフォールバック均等分割
 #
 # 2) split_for_rag_texts_only() / split_for_rag(chunk_size=800)
 #    -> split_for_rag_structure_aware() をラップ
@@ -899,7 +900,7 @@ def _split_text_evenly(text: str, max_chars: int) -> list[str]:
     """テキストを max_chars 以下でなるべく均等な長さに分割する。
 
     呼び出し元:
-      - flatten_chunks() 内の _walk()
+      - flatten_chunks() 内の _emit_parent() / _emit_child()
     """
     text = text.strip()
     if not text or len(text) <= max_chars:
@@ -917,13 +918,19 @@ def _split_text_evenly(text: str, max_chars: int) -> list[str]:
 def _group_items_balanced(
     item_sizes: list[int], max_per_group: int
 ) -> list[list[int]]:
-    """アイテム(サイズ配列)を max_per_group 以下の均等なグループに分割する。
-
-    各グループは item_sizes のインデックスリスト。
-    子ノード境界を尊重しつつ、グループ間のサイズ差を小さくする。
+    """サイズ配列を max_per_group 以下のグループに均等分割し、
+    各グループに属するアイテムのインデックスリストを返す。
 
     呼び出し元:
-      - flatten_chunks() 内の _walk()
+      - flatten_chunks() 内の _emit_parent()
+
+    分割方針:
+      - 合計 total が max 以下なら 1 グループにまとめる
+      - そうでなければ n = ceil(total / max) を最小分割数とし、
+        target = ceil(total / n) を均等ターゲットにする
+      - 子のサイズを順に積み、target 到達 or max 到達で次のグループへ
+      - これにより「子境界を尊重」「max_per_group 以下」「均等に近い」
+        の3条件を素直に両立できる
     """
     if not item_sizes:
         return []
@@ -956,171 +963,318 @@ def _group_items_balanced(
     return groups
 
 
-def flatten_chunks(root: SectionNode, config: ChunkingConfig) -> list[dict]:
+def _chunk_role_for_node(node: SectionNode) -> str:
+    """ノードの heading_type / level からチャンクの役割を判定する。
+
+    呼び出し元:
+      - default_metadata_builder()
+    """
+    if node.heading_type == "paragraph":
+        return "fallback"
+    if node.level == 1:
+        return "parent"
+    if node.level == 2:
+        return "child"
+    # level>=3 は通常独立チャンクにしないが、safety net として child 扱い
+    return "child"
+
+
+def default_metadata_builder(
+    *,
+    chunk_id: str,
+    node: SectionNode,
+    path: list[str],
+    section_parent_id: str | None,
+    ancestor_chain: list[dict[str, Any]],
+    doc_root_id: str,
+    split_index: int = 0,
+    split_total: int = 1,
+) -> dict[str, Any]:
+    """既定の metadata builder。チャンクの親子構造情報を生成する。
+
+    呼び出し元:
+      - flatten_chunks() (metadata_builder 未指定時)
+
+    差し替え方法:
+      chunker.py 等で独自フィールド (doc_id, source 等) を含めたい場合は、
+      本関数と同じシグネチャ (キーワード引数のみ) を持つ関数を作成し、
+      flatten_chunks() / split_for_rag_structure_aware() の
+      metadata_builder 引数に渡す。差し替え時は本関数を内部で呼び出して
+      ベース dict を取得し、独自フィールドをマージする実装を推奨する。
+    """
+    return {
+        "chunk_id": chunk_id,
+        "parent_id": section_parent_id,
+        # v3 互換のため残置 (v4 では使用しない)
+        "grandparent_id": None,
+        "root_id": doc_root_id,
+        "children_ids": [],
+        "level": node.level,
+        "chunk_role": _chunk_role_for_node(node),
+        "heading": node.heading,
+        "heading_type": node.heading_type,
+        "path": path,
+        "path_text": " > ".join(path),
+        "ordinal": node.ordinal,
+        "start_char": node.start_char,
+        "end_char": node.end_char,
+        "source_type": "txt",
+        "chunking_strategy": "structure_aware_v4",
+        "structure_confidence": node.confidence,
+        "inference_reason": node.inference_reason,
+        "split_index": split_index,
+        "split_total": split_total,
+        "ancestor_chain": ancestor_chain,
+    }
+
+
+def _has_multiline_body(text: str, heading: str) -> bool:
+    """条のテキストから先頭の見出しを除いた本文が、空行を除いて2行以上あるかを判定。
+
+    呼び出し元:
+      - flatten_chunks() 内の _emit_child()
+
+    判定ルール:
+      - text の先頭が heading に一致するなら、その分を除外して本文を取り出す
+      - 本文を行分割して、空白のみの行を除外した残りが 2 行以上なら True
+      - 1 行しかない条 (例: 第22条 のような単一段落) は子チャンク化対象外となる
+      - 「不要な空行」が混じっていても、空行は除外されるので影響しない
+    """
+    body = text.strip()
+    if heading and body.startswith(heading):
+        body = body[len(heading):]
+    meaningful = [ln for ln in body.split("\n") if ln.strip()]
+    return len(meaningful) >= 2
+
+
+def flatten_chunks(
+    root: SectionNode,
+    config: ChunkingConfig,
+    metadata_builder: MetadataBuilder | None = None,
+) -> list[dict]:
     """セクションツリーをRAG投入用チャンク配列へ平坦化する。
 
-    分割戦略 (structure_aware_v2):
-      - node.text が max_chunk_chars 以内
-        → 子孫をまとめて1チャンクとして出力（重複なし）
-      - max_chunk_chars を超え、子ノードあり
-        → 親テキストを先頭に付与し、子ノード境界で複数チャンクに分割
-        → 子ノード自体が超過する場合は均等分割
-      - 末端ノード（children なし）で超過 → テキストを均等分割
-      - 全チャンクに parent_id を付与し、同一親ノード配下を識別可能にする
-      - 0件時は最低1チャンクを補償
+    分割戦略 (structure_aware_v4):
+      - level==1 のノード (章相当) を「親チャンク」として出力する。
+        サイズが max_chunk_chars 以内なら 1 チャンク、超過時は子(条)境界を
+        尊重した均等分割を行う (子は分割されない)。各分割チャンクの先頭に
+        は親見出し (章ヘッダ + 章先頭の本文) を必ず付与する。
+        附則のような少数構造でも level 推論で 1 と判定されたものは
+        同様に親チャンクとして扱う (「1の層」共通認識)。
+      - level==2 のノード (条相当) を「子チャンク」として出力する。
+        ただし、見出し行を除いた本文に空行を除いて 2 行以上残るもののみ
+        子チャンク化する (単一段落で完結する条はノイズ抑制のため除外)。
+      - 子チャンクのサイズが max_chunk_chars を超える場合は、条の見出しを
+        各分割チャンクの先頭に付与しつつ均等分割する (条は通常分割しない
+        が、超過時のみフォールバックとして文字数ベースで均等分割)。
+      - level>=3 のノード (列挙等) は独立したチャンクにしない。
+        親/子チャンクの本文に内包されるかたちで保持される。
+      - 親-子の階層情報は ancestor_chain / parent_id で表現する。
+      - 0 件時は最低 1 チャンクを補償する。
+
+    引数:
+      metadata_builder: チャンク metadata の生成関数。None なら
+        default_metadata_builder を使用。chunker.py 等から差し替えて
+        独自フィールド (doc_id 等) をマージできる。
 
     呼び出し元:
       - split_for_rag_structure_aware()
       - main()
     呼び出し先:
-      - _split_text_evenly()
+      - default_metadata_builder()
+      - _has_multiline_body()
       - _group_items_balanced()
+      - _split_text_evenly()
     """
+    if metadata_builder is None:
+        metadata_builder = default_metadata_builder
+
     doc_root_id = "doc_" + hashlib.sha256(root.heading.encode()).hexdigest()[:8]
     chunks: list[dict] = []
 
-    def _chunk_role(node: SectionNode) -> str:
-        if node.heading_type == "paragraph":
-            return "fallback"
-        if node.level == 1:
-            return "parent"
-        if node.level == 2:
-            return "main"
-        return "child"
-
-    def _make_metadata(
+    def _build_meta(
         chunk_id: str,
         node: SectionNode,
         path: list[str],
         section_parent_id: str | None,
+        ancestor_chain: list[dict[str, Any]],
         *,
         split_index: int = 0,
         split_total: int = 1,
     ) -> dict[str, Any]:
+        # metadata_builder へキーワード引数で委譲。差し替え可能設計。
+        return metadata_builder(
+            chunk_id=chunk_id,
+            node=node,
+            path=path,
+            section_parent_id=section_parent_id,
+            ancestor_chain=ancestor_chain,
+            doc_root_id=doc_root_id,
+            split_index=split_index,
+            split_total=split_total,
+        )
+
+    def _ancestor_entry(node: SectionNode) -> dict[str, Any]:
         return {
-            "chunk_id": chunk_id,
-            "parent_id": section_parent_id,
-            "root_id": doc_root_id,
-            "children_ids": [],
-            "level": node.level,
-            "chunk_role": _chunk_role(node),
+            "id": f"chunk_{node.id}",
             "heading": node.heading,
+            "level": node.level,
             "heading_type": node.heading_type,
-            "path": path,
-            "path_text": " > ".join(path),
-            "ordinal": node.ordinal,
-            "start_char": node.start_char,
-            "end_char": node.end_char,
-            "source_type": "txt",
-            "chunking_strategy": "structure_aware_v2",
-            "structure_confidence": node.confidence,
-            "inference_reason": node.inference_reason,
-            "split_index": split_index,
-            "split_total": split_total,
         }
 
-    def _walk(node: SectionNode, path: list[str]) -> None:
-        if node.heading_type == "document_root":
-            for child in node.children:
-                _walk(child, [node.heading])
+    def _emit_parent(node: SectionNode, ancestors: list[SectionNode]) -> None:
+        # level==1 (章 / 附則) を親チャンクとして出力
+        text = node.text.strip()
+        if not text or len(text) < config.min_child_text_length:
             return
-
-        full_text = node.text
-        current_path = path + [node.heading]
+        ancestor_chain = [_ancestor_entry(a) for a in ancestors]
+        path = [root.heading] + [a.heading for a in ancestors] + [node.heading]
         base_id = f"chunk_{node.id}"
-        # 同一親ノード配下のチャンクは同一の parent_id を持つ
         section_parent_id = f"chunk_{node.parent_id}" if node.parent_id else None
-        stripped = full_text.strip()
 
-        if not stripped or len(stripped) < config.min_child_text_length:
-            return
-
-        # --- ケース1: サイズが収まる → 1チャンク出力 ---
-        if len(stripped) <= config.max_chunk_chars:
+        if len(text) <= config.max_chunk_chars:
             chunks.append({
                 "id": base_id,
-                "text": stripped,
-                "metadata": _make_metadata(
-                    base_id, node, current_path, section_parent_id,
+                "text": text,
+                "metadata": _build_meta(
+                    base_id, node, path, section_parent_id, ancestor_chain,
                 ),
             })
             return
 
-        # --- ケース2: 末端ノード(子なし)で超過 → 均等分割 ---
-        if not node.children:
-            parts = _split_text_evenly(stripped, config.max_chunk_chars)
+        # --- 章サイズ超過: 子(条)境界で均等分割 ---
+        # 章 prefix = 「章見出し + 最初の条までの本文」。各分割の先頭に付与する。
+        children_with_text = [c for c in node.children if c.text.strip()]
+        if children_with_text:
+            first_child = children_with_text[0]
+            prefix_text = node.text[: first_child.start_char - node.start_char].rstrip()
+        else:
+            prefix_text = ""
+        if not prefix_text:
+            prefix_text = node.heading
+        prefix_line = prefix_text + "\n"
+        available = config.max_chunk_chars - len(prefix_line)
+
+        if available <= 0 or not children_with_text:
+            # prefix だけで超過 or 子が無い → 文字数ベースの単純均等分割
+            parts = _split_text_evenly(text, config.max_chunk_chars)
             for pi, part in enumerate(parts):
                 cid = f"{base_id}_p{pi}" if len(parts) > 1 else base_id
                 chunks.append({
                     "id": cid,
                     "text": part,
-                    "metadata": _make_metadata(
-                        cid, node, current_path, section_parent_id,
+                    "metadata": _build_meta(
+                        cid, node, path, section_parent_id, ancestor_chain,
                         split_index=pi, split_total=len(parts),
                     ),
                 })
             return
 
-        # --- ケース3: 子ノードあり & 超過 → 子ノード境界で分割 ---
-        # 親プレフィックス: 見出し行 + 最初の子ノード開始前のテキスト
-        first_child = node.children[0]
-        prefix = full_text[: first_child.start_char - node.start_char].strip()
-        prefix_line = (prefix + "\n") if prefix else ""
-        available = config.max_chunk_chars - len(prefix_line)
-
-        if available <= 0:
-            # プレフィックス自体が max_chunk_chars を超過 → 子ノードへ再帰
-            for child in node.children:
-                _walk(child, current_path)
-            return
-
-        # 子ノードテキスト準備（超過する子は均等分割）
-        items: list[str] = []
-        for child in node.children:
-            child_text = child.text.strip()
-            if not child_text:
-                continue
-            if len(child_text) > available:
-                items.extend(_split_text_evenly(child_text, available))
-            else:
-                items.append(child_text)
-
-        if not items:
-            chunks.append({
-                "id": base_id,
-                "text": prefix or stripped,
-                "metadata": _make_metadata(
-                    base_id, node, current_path, section_parent_id,
-                ),
-            })
-            return
-
-        # 子ノード境界を保持しつつ均等にグループ化
-        # +1 は結合時の \n セパレータ分
-        groups = _group_items_balanced([len(t) + 1 for t in items], available)
+        # 子(条)テキスト群と各サイズ (+1 は結合時の \n 区切り分)
+        child_texts = [c.text.strip() for c in children_with_text]
+        child_sizes = [len(t) + 1 for t in child_texts]
+        groups = _group_items_balanced(child_sizes, available)
 
         for gi, indices in enumerate(groups):
-            body = "\n".join(items[idx] for idx in indices)
-            chunk_text = (prefix_line + body).strip()
-            cid = f"{base_id}_s{gi}" if len(groups) > 1 else base_id
+            body = "\n".join(child_texts[i] for i in indices)
+            chunk_text = prefix_line + body
+            cid = f"{base_id}_p{gi}" if len(groups) > 1 else base_id
             chunks.append({
                 "id": cid,
                 "text": chunk_text,
-                "metadata": _make_metadata(
-                    cid, node, current_path, section_parent_id,
+                "metadata": _build_meta(
+                    cid, node, path, section_parent_id, ancestor_chain,
                     split_index=gi, split_total=len(groups),
                 ),
             })
 
-    for child in root.children:
-        _walk(child, [root.heading])
+    def _emit_child(node: SectionNode, ancestors: list[SectionNode]) -> None:
+        # level==2 (条) を子チャンクとして出力 (本文が複数行のもののみ)
+        text = node.text.strip()
+        if not text or len(text) < config.min_child_text_length:
+            return
+        if not _has_multiline_body(text, node.heading):
+            # 単一段落の条 (例: 第22条) は子チャンク化しない
+            return
+
+        ancestor_chain = [_ancestor_entry(a) for a in ancestors]
+        path = [root.heading] + [a.heading for a in ancestors] + [node.heading]
+        base_id = f"chunk_{node.id}"
+        section_parent_id = f"chunk_{node.parent_id}" if node.parent_id else None
+
+        if len(text) <= config.max_chunk_chars:
+            chunks.append({
+                "id": base_id,
+                "text": text,
+                "metadata": _build_meta(
+                    base_id, node, path, section_parent_id, ancestor_chain,
+                ),
+            })
+            return
+
+        # 条単独で超過 → 見出しを各チャンク先頭に付与しつつ均等分割
+        heading_line = node.heading
+        if text.startswith(heading_line):
+            body = text[len(heading_line):].lstrip("\n")
+        else:
+            body = text
+        prefix = f"{heading_line}\n"
+        available = config.max_chunk_chars - len(prefix)
+
+        if available <= 0:
+            # 見出し自体が max_chunk_chars を超える異常ケース。
+            # 条文の保全を最優先し全文をそのまま均等分割する。
+            parts = _split_text_evenly(text, config.max_chunk_chars)
+            for pi, part in enumerate(parts):
+                cid = f"{base_id}_p{pi}" if len(parts) > 1 else base_id
+                chunks.append({
+                    "id": cid,
+                    "text": part,
+                    "metadata": _build_meta(
+                        cid, node, path, section_parent_id, ancestor_chain,
+                        split_index=pi, split_total=len(parts),
+                    ),
+                })
+            return
+
+        parts = _split_text_evenly(body, available)
+        for pi, part in enumerate(parts):
+            cid = f"{base_id}_p{pi}" if len(parts) > 1 else base_id
+            chunk_text = f"{prefix}{part}"
+            chunks.append({
+                "id": cid,
+                "text": chunk_text,
+                "metadata": _build_meta(
+                    cid, node, path, section_parent_id, ancestor_chain,
+                    split_index=pi, split_total=len(parts),
+                ),
+            })
+
+    def _walk(node: SectionNode, ancestors: list[SectionNode]) -> None:
+        if node.heading_type == "document_root":
+            for child in node.children:
+                _walk(child, ancestors)
+            return
+
+        # 親チャンク (level==1) と 子チャンク (level==2) を適切に出力
+        if node.level == 1:
+            _emit_parent(node, ancestors)
+        elif node.level == 2:
+            _emit_child(node, ancestors)
+        # level>=3 のノードは独立チャンク化しない (親/子チャンク本文に含まれる)
+
+        # 自身を ancestors に積みつつ子孫を再帰探索 (level==2 を見つけるため)
+        for child in node.children:
+            _walk(child, ancestors + [node])
+
+    _walk(root, [])
 
     if not chunks:
         chunks.append({
             "id": f"chunk_{root.id}",
             "text": root.text.strip() or "(empty)",
-            "metadata": _make_metadata(
-                f"chunk_{root.id}", root, [root.heading], None,
+            "metadata": _build_meta(
+                f"chunk_{root.id}", root, [root.heading], None, [],
             ),
         })
 
@@ -1135,8 +1289,13 @@ def flatten_chunks(root: SectionNode, config: ChunkingConfig) -> list[dict]:
 def split_for_rag_structure_aware(
     text: str,
     config: ChunkingConfig | None = None,
+    metadata_builder: MetadataBuilder | None = None,
 ) -> list[dict]:
     """構造認識チャンク化のエントリーポイント。
+
+    引数:
+      metadata_builder: チャンク metadata の生成関数。None なら
+        default_metadata_builder を使用。chunker.py 等から差し替え可能。
 
     呼び出し順:
       normalize_text()
@@ -1144,7 +1303,7 @@ def split_for_rag_structure_aware(
       -> analyze_heading_groups()
       -> infer_heading_levels()
       -> build_section_tree()
-      -> flatten_chunks()
+      -> flatten_chunks(metadata_builder=...)
     """
     if config is None:
         config = ChunkingConfig()
@@ -1168,9 +1327,11 @@ def split_for_rag_structure_aware(
                 "start_char": 0,
                 "end_char": 0,
                 "source_type": "txt",
-                "chunking_strategy": "structure_aware_v1",
+                "chunking_strategy": "structure_aware_v4",
                 "structure_confidence": 0.0,
                 "inference_reason": {},
+                "ancestor_chain": [],
+                "grandparent_id": None,
             },
         }]
 
@@ -1179,7 +1340,7 @@ def split_for_rag_structure_aware(
     group_stats = analyze_heading_groups(candidates, normalized, config)
     candidates = infer_heading_levels(candidates, group_stats, config)
     root = build_section_tree(normalized, candidates, config)
-    return flatten_chunks(root, config)
+    return flatten_chunks(root, config, metadata_builder=metadata_builder)
 
 
 def split_for_rag_texts_only(text: str) -> list[str]:
@@ -1207,9 +1368,10 @@ def split_for_rag_with_metadata(
     """metadata 付きスプリッタ（chunker.py から experiment_context 経由で利用される）。
 
     返り値は [{"text": str, "metadata": dict}, ...] 形式。
-    metadata には structure_aware_v2 の階層情報 (path, level, chunk_role 等) が
-    含まれる。chunker.py 側で chunk_id / doc_id / source / document_lower の
-    最低限デフォルトを後付けするので、ここではロジック固有情報のみを返せばよい。
+    default_metadata_builder が生成する structure_aware_v4 の親子チャンク情報
+    (chunk_role, ancestor_chain, path, parent_id 等) を metadata として保持する。
+    chunker.py 側で chunk_id / doc_id / source / document_lower の最低限デフォルト
+    を後付けするので、ここではロジック固有情報のみを返せばよい。
 
     chunk_overlap は構造認識の性質上未使用 (引数互換のため受け取るのみ)。
     """

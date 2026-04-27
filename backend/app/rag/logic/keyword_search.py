@@ -2,13 +2,19 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Final, Protocol
 
 from app.core.config import Settings
 from app.langfuse.tracer import observe_keyword_retrieval
 from app.rag.logic.experiment_context import get_tokenize_query
 from app.rag.schemas import RetrievedChunk
 from app.rag.vectorstore.vector_db import rag_load_keyword_rows
+
+# Chroma の metadatas で backend が必ず生成する予約キー。
+# RetrievedChunk.metadata には予約キー以外を集約して詰める。
+_RESERVED_METADATA_KEYS: Final[frozenset[str]] = frozenset(
+    {"doc_id", "chunk_id", "source", "chunk_text"}
+)
 
 # -----------------------------------------------------------------------------
 # 役割: キーワード検索処理を集約し、ドキュメント保持型ベクトル DB へ被せる薄いラッパを提供する。
@@ -69,6 +75,10 @@ def search_keyword_chunks(
 
         out: list[RetrievedChunk] = []
         for (meta, raw), norm in zip(scored, normalized, strict=True):
+            # 予約キー以外をロジック由来 metadata として復元する
+            custom_meta = {
+                k: v for k, v in meta.items() if k not in _RESERVED_METADATA_KEYS
+            }
             out.append(
                 RetrievedChunk(
                     doc_id=str(meta.get("doc_id", "")),
@@ -81,6 +91,7 @@ def search_keyword_chunks(
                     vector_score_norm=None,
                     final_score=min(1.0, max(0.0, norm * keyword_weight)),
                     retrieval_type="keyword",
+                    metadata=custom_meta,
                 )
             )
         return out

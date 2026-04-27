@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -36,3 +36,6 @@ class RetrievedChunk(BaseModel):
         description="キーワード: keyword_weight * keyword_score_norm。ベクトル: vector_score_norm",
     )
     retrieval_type: RetrievalType = "keyword"
+    # ロジック由来の追加 metadata（予約キーを除く）。Chroma 書き込み時に dict/list は
+    # JSON 文字列化されているため、必要に応じて呼び出し側で json.loads する。
+    metadata: dict[str, Any] = Field(default_factory=dict)
