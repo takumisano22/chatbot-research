@@ -10,8 +10,8 @@ ingest_document/DOCSET-0001/*.pdf
 qa_datasets/*.json
 
 # --- エディタ・ローカル AI ---
-.claude/
-.cursor/
+.claude/*
+.cursor/*
 .cursorignore
 agent-transcripts/
 mcps/
