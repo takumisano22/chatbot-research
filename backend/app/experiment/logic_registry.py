@@ -13,18 +13,6 @@ from app.rag.schemas import RetrievedChunk
 
 LogicCategory = Literal["chunking", "tokenizer", "search", "reranking", "prompt"]
 
-_LISTED_LOGIC_IDS: dict[str, tuple[str, ...]] = {
-    "chunking_logic_ids": ("logic_01",),
-    "tokenizer_logic_ids": ("logic_01",),
-    "search_logic_ids": ("logic_01", "logic_02"),
-    "reranking_logic_ids": ("logic_01",),
-    "prompt_logic_ids": ("logic_01",),
-}
-
-
-def get_logic_registry_info() -> dict[str, tuple[str, ...]]:
-    return dict(_LISTED_LOGIC_IDS)
-
 _CATEGORY_MODULE: Final[dict[LogicCategory, str]] = {
     "chunking": "app.rag.logic.chunking",
     "tokenizer": "app.rag.logic.tokenizer",

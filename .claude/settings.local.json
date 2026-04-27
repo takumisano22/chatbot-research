@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python backend/app/rag/logic/chunking/chunking_logic_02.py docs/dev_prompts/normalized_txt.txt --debug --print-tree)",
+      "Bash(python backend/app/rag/logic/chunking/chunking_logic_02.py docs/dev_prompts/normalized_txt.txt --debug)",
+      "Bash(python -c ' *)",
+      "Bash(python backend/app/rag/logic/chunking/chunking_logic_02.py docs/dev_prompts/normalized_txt.txt --print-tree)",
+      "Bash(python backend/app/rag/logic/chunking/chunking_logic_02.py docs/dev_prompts/normalized_txt.txt --out /tmp/chunks_test.json)"
+    ]
+  }
+}
