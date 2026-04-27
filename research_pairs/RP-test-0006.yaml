@@ -11,6 +11,7 @@ reranking_logic_id: logic_01
 tokenizer_logic_id: logic_01
 prompt_logic_id: logic_04
 
+
 top_k: 4
 qa_dataset: standard_qa.json
 document_set_id: DOCSET-0001
