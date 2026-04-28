@@ -22,7 +22,6 @@ MetadataBuilder = Callable[..., dict[str, Any]]
 # ============================================================
 # 1) split_for_rag_structure_aware()
 #    -> normalize_text()
-#       -> _split_embedded_headings()
 #       -> _ensure_blank_before_headings()
 #    -> extract_heading_candidates()
 #       -> _extract_marker_value()
@@ -32,20 +31,19 @@ MetadataBuilder = Callable[..., dict[str, Any]]
 #       -> _compute_containment_and_reset()
 #    -> infer_heading_levels()
 #    -> build_section_tree()
-#       -> _candidate_confidence()
+#       -> _rebuild_tree_by_hints()   # default_level_hint で親子を再正規化
 #       -> _add_paragraph_fallback()  # 見出し無し時のみ
 #    -> flatten_chunks(metadata_builder=...)  # 親(章)/子(条) チャンク生成 (structure_aware_v4)
 #       -> default_metadata_builder() # 既定の metadata 生成 (差し替え可)
-#       -> _has_multiline_body()      # 条本文が複数行か判定 (子チャンク採否)
+#       -> _meaningful_body_lines()   # 条本文の有意行数 (子チャンク採否/昇格判定)
 #       -> _group_items_balanced()    # 親チャンクの子境界均等分割
 #       -> _split_text_evenly()       # 子チャンク超過時のフォールバック均等分割
 #
-# 2) split_for_rag_texts_only() / split_for_rag(chunk_size=800)
+# 2) split_for_rag(chunk_size=800)
 #    -> split_for_rag_structure_aware() をラップ
 #
 # 3) main() (CLI)
 #    -> split_for_rag_structure_aware() と同等の各ステップを順に実行
-#    -> _print_tree() を必要時に実行
 
 
 # ============================================================
@@ -65,8 +63,6 @@ class ChunkingConfig:
     max_heading_line_length: int = 80
     # 子セクションとして残す最小本文長。短すぎるノードの乱立を抑える。
     min_child_text_length: int = 10
-    # 行内に埋め込まれた強い見出し（例: 「。第10条...」）を分割・補正するか。
-    enable_inline_heading_repair: bool = True
     # グループ統計から見出し level を推論するか。False ならルール既定寄りになる。
     enable_level_inference: bool = True
     # 見出し抽出に失敗した場合、段落ベースのフォールバックチャンクを作るか。
@@ -74,8 +70,6 @@ class ChunkingConfig:
     # max_chunk_chars: この文字数を超えるセクションは子ノードへ分割委譲する。
     # 収まる場合は子孫テキストを含めて1チャンクにまとめ、重複を防ぐ。
     max_chunk_chars: int = 1500
-    # True の場合、候補抽出・推論の診断情報を出力する（CLIデバッグ向け）。
-    debug: bool = False
 
 
 @dataclass
@@ -89,19 +83,12 @@ class HeadingRule:
 @dataclass
 class HeadingCandidate:
     text: str
-    line_index: int
     start_char: int
-    end_char: int
-    raw_marker: str
     marker_type: str
     marker_value: int | str | None
-    normalized_marker: str
     indent: int
-    line_length: int
     score: float
-    features: dict[str, Any]
     inferred_level: int | None = None
-    inference_reason: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -110,14 +97,10 @@ class SectionNode:
     heading: str
     heading_type: str
     level: int
-    ordinal: int | None
     text: str
     start_char: int
-    end_char: int
     parent_id: str | None
     children: list["SectionNode"] = field(default_factory=list)
-    confidence: float = 0.0
-    inference_reason: dict[str, Any] = field(default_factory=dict)
 
 
 # ============================================================
@@ -152,32 +135,13 @@ DEFAULT_HEADING_RULES: list[HeadingRule] = [
 
 # コンパイル済みルール (モジュール読込時に1回だけ生成)
 # - 目的: 行ごとの見出し判定で毎回 re.compile しないようにして高速化する
-# - 内容: (HeadingRule, コンパイル済み正規表現) のタプル配列
-# - 元データ: DEFAULT_HEADING_RULES
 # - 利用箇所: extract_heading_candidates() の「ルールマッチ」ループ
 _COMPILED_RULES: list[tuple[HeadingRule, re.Pattern[str]]] = [
     (rule, re.compile(rule.regex)) for rule in DEFAULT_HEADING_RULES if rule.regex
 ]
 
-# 文中参照を見出しと誤認しないためのパターン
-_INLINE_REF_RE = re.compile(
-    r"(?:"
-    # XX法/規則等: 他の法令・規程への条文参照
-    r"[^\s。、]{1,20}(?:法|規則|条例|規程)第[0-9一二三四五六七八九十百千〇]+[条章項号]?"
-    # 前条・本条・次項 etc.: 同一文書内の相対参照
-    r"|(?:前|本|次|各|当該|同)(?:条|項|号|章)"
-    # 第n条 + 接尾辞: 文章内で参照として使われており見出し行ではない
-    r"|第[0-9一二三四五六七八九十百千〇]+条"
-    r"(?:各号|第[0-9一二三四五六七八九十百千〇]+項"  # 下位番号参照
-    r"|に基づ|の規定|を準用|の定め"                  # 規定を援用する表現
-    r"|により|について|に従|に違)"                    # 条文を修飾する助詞・動詞
-    r")"
-)
-
-# 強い見出しパターン (文中への埋め込み検出用)
-_STRONG_HEADING_EMBEDDED_RE = re.compile(
-    r"(。|．)(第[0-9一二三四五六七八九十百千〇]+(?:章|条)(?:[（(][^）)\n]{0,20}[）)])?)"
-)
+# 強い見出し行判定用の正規表現（normalize_text の空行挿入で利用）
+_STRONG_HEADING_LINE_RE = re.compile(r"^(?:附則|第[0-9一二三四五六七八九十百千〇]+(?:章|条))")
 
 # 漢数字変換テーブル
 _KANJI_NUM: dict[str, int] = {
@@ -193,11 +157,7 @@ _KANJI_NUM: dict[str, int] = {
 
 
 def _kanji_to_int(s: str) -> int | None:
-    """漢数字混じり文字列を整数に変換。失敗時はNone。
-
-    呼び出し元:
-      - _extract_marker_value()
-    """
+    """漢数字混じり文字列を整数に変換。失敗時はNone。"""
     try:
         return int(s)
     except ValueError:
@@ -215,41 +175,14 @@ def _kanji_to_int(s: str) -> int | None:
     return result + current or None
 
 
-def _is_inline_ref(text: str) -> bool:
-    """文中参照らしい表現を含むか判定する補助関数。
-
-    呼び出し元:
-      - _is_strong_heading_line()
-      - _split_embedded_headings()
-      - extract_heading_candidates()
-    """
-    return bool(_INLINE_REF_RE.search(text))
-
-
-def _is_strong_heading_line(stripped: str) -> bool:
-    """第n章/第n条/附則 で始まる行かどうか (文中参照を除く)。"""
-    if _is_inline_ref(stripped):
-        return False
-    return bool(re.match(r"^(?:附則|第[0-9一二三四五六七八九十百千〇]+(?:章|条))", stripped))
-
-
 def _section_id(heading: str, start_char: int) -> str:
-    """見出し文字列と開始位置から安定したセクションIDを生成する。
-
-    呼び出し元:
-      - build_section_tree()
-      - _add_paragraph_fallback()
-    """
+    """見出し文字列と開始位置から安定したセクションIDを生成する。"""
     key = f"{start_char}|{heading}"
     return "sec_" + hashlib.sha256(key.encode()).hexdigest()[:8]
 
 
 def _extract_marker_value(marker_type: str, raw_marker: str) -> int | str | None:
-    """見出しマーカー文字列から比較可能な番号値を抽出する。
-
-    呼び出し元:
-      - extract_heading_candidates()
-    """
+    """見出しマーカー文字列から比較可能な番号値を抽出する。"""
     if marker_type in ("japanese_chapter", "japanese_article", "japanese_section", "appendix"):
         m = re.search(r"[0-9一二三四五六七八九十百千〇]+", raw_marker)
         if m:
@@ -276,80 +209,28 @@ def normalize_text(text: str, config: ChunkingConfig | None = None) -> str:
     """チャンク抽出前の正規化を行う。
 
     実施内容:
-      - 改行コード統一
-      - 全角空白の半角化
-      - 行末空白除去
-      - 行内埋め込み見出しの分割
       - 強見出し前の空行挿入
-      - 過剰な連続空行の圧縮
 
-    呼び出し元:
-      - split_for_rag_structure_aware()
-      - main()
-    呼び出し先:
-      - _split_embedded_headings()
-      - _ensure_blank_before_headings()
+    改行コード統一・全角/半角・行末空白・連続空行の圧縮は別工程で
+    正規化済みである前提のため、ここでは扱わない。
+    また、用いる資料では必要な見出しは改行されており、文中に見出しが
+    含まれていても平文として扱う方針のため、行内埋め込み見出しの分割
+    も行わない。
     """
     if not text:
         return ""
 
-    # 改行コード統一
-    text = text.replace("\r\n", "\n").replace("\r", "\n")
-
-    # 全角スペース→半角スペース
-    text = text.replace("　", " ")
-
-    # 行末空白削除
-    lines = [line.rstrip() for line in text.split("\n")]
-
-    # 行内に埋め込まれた強い見出しを行分割する
-    if config is None or config.enable_inline_heading_repair:
-        lines = _split_embedded_headings(lines)
-
-    # 強い見出し行の直前に空行がなければ挿入する
-    if config is None or config.enable_inline_heading_repair:
-        lines = _ensure_blank_before_headings(lines)
-
-    # 3つ以上の連続空行を2つに圧縮
-    text = "\n".join(lines)
-    text = re.sub(r"\n{3,}", "\n\n", text)
-
-    return text
-
-
-def _split_embedded_headings(lines: list[str]) -> list[str]:
-    """
-    "...する。第10条（服務）..." のような行内埋め込み見出しを分割する。
-    文中参照（労働基準法第89条等）は対象外。
-    """
-    result: list[str] = []
-    for line in lines:
-        m = _STRONG_HEADING_EMBEDDED_RE.search(line)
-        if not m:
-            result.append(line)
-            continue
-        # 見出し候補の後続コンテキストが参照表現なら分割しない
-        after = line[m.end():]
-        if _INLINE_REF_RE.search(after[:40]):
-            result.append(line)
-            continue
-        pre = line[: m.start(2)]   # 句点まで
-        heading_and_rest = line[m.start(2):]
-        result.append(pre)
-        result.append(heading_and_rest)
-    return result
+    # 強い見出し行の直前に空行が無ければ挿入し、後段の after_blank 判定を効かせる
+    lines = text.split("\n")
+    lines = _ensure_blank_before_headings(lines)
+    return "\n".join(lines)
 
 
 def _ensure_blank_before_headings(lines: list[str]) -> list[str]:
-    """強い見出し行 (第n章/第n条/附則) の直前が非空行なら空行を挿入する。
-
-    呼び出し元:
-      - normalize_text()
-    """
+    """強い見出し行 (第n章/第n条/附則) の直前が非空行なら空行を挿入する。"""
     result: list[str] = []
     for i, line in enumerate(lines):
-        stripped = line.strip()
-        if _is_strong_heading_line(stripped) and i > 0 and lines[i - 1].strip():
+        if _STRONG_HEADING_LINE_RE.match(line.strip()) and i > 0 and lines[i - 1].strip():
             result.append("")
         result.append(line)
     return result
@@ -363,23 +244,7 @@ def _ensure_blank_before_headings(lines: list[str]) -> list[str]:
 def extract_heading_candidates(
     text: str, config: ChunkingConfig
 ) -> list[HeadingCandidate]:
-    """各行から見出し候補を抽出し、特徴量ベースでスコアリングする。
-
-    実施内容:
-      - 見出しルールとの先頭マッチ判定
-      - 文字長・空行後・インデント・句点有無などで加点/減点
-      - 文中参照らしさやURLらしさなどを減点
-      - 閾値未満を除外後、候補を返却
-      - 最後に連番ボーナスを適用
-
-    呼び出し元:
-      - split_for_rag_structure_aware()
-      - main()
-    呼び出し先:
-      - _extract_marker_value()
-      - _is_inline_ref()
-      - _award_sequence_bonus()
-    """
+    """各行から見出し候補を抽出し、特徴量ベースでスコアリングする。"""
     if not text:
         return []
 
@@ -420,57 +285,34 @@ def extract_heading_candidates(
 
         marker_type = matched_rule.name
         marker_value = _extract_marker_value(marker_type, raw_marker)
-        normalized_marker = raw_marker.strip()
 
         # --- スコアリング ---
-        features: dict[str, Any] = {}
         score = 3.0  # 行頭でパターン一致
-        features["line_start_match"] = True
 
         if prev_blank:
             score += 1.0
-            features["after_blank"] = True
-
         if line_len <= 40:
             score += 1.0
-            features["short_line"] = True
-
         if marker_type in ("japanese_chapter", "japanese_article", "appendix"):
             score += 4.0
-            features["strong_japanese"] = True
         elif marker_type == "japanese_section":
             score += 2.0
-
         if re.search(r"[（(][^）)\n]{1,30}[）)]", stripped):
             score += 2.0
-            features["paren_title"] = True
-
         if not stripped.endswith(("。", ".", "．")):
             score += 1.0
-            features["no_period"] = True
-
         if indent == 0:
             score += 1.0
-            features["zero_indent"] = True
         elif indent <= 2:
             score += 0.5
 
         # 減点
-        if _is_inline_ref(stripped):
-            score -= 4.0
-            features["inline_ref"] = True
-
         if line_len > 60:
             score -= 2.0
-            features["long_line"] = True
-
         if stripped.count("。") + stripped.count("．") >= 2:
             score -= 2.0
-            features["multiple_periods"] = True
-
         if re.search(r"https?://|@\w+\.", stripped):
             score -= 3.0
-            features["url_like"] = True
 
         if score < config.min_heading_score:
             continue
@@ -478,17 +320,11 @@ def extract_heading_candidates(
         candidates.append(
             HeadingCandidate(
                 text=stripped,
-                line_index=line_idx,
                 start_char=line_start,
-                end_char=line_start + len(line),
-                raw_marker=raw_marker,
                 marker_type=marker_type,
                 marker_value=marker_value,
-                normalized_marker=normalized_marker,
                 indent=indent,
-                line_length=line_len,
                 score=score,
-                features=features,
             )
         )
 
@@ -508,11 +344,9 @@ def _award_sequence_bonus(candidates: list[HeadingCandidate]) -> None:
         if prev is not None:
             if c.marker_value == prev + 1:
                 c.score += 2.0
-                c.features["seq_bonus"] = True
             elif c.marker_value == 1 and prev >= 1:
                 # リセット (別親セクションへの遷移) - 弱いボーナス
                 c.score += 0.5
-                c.features["seq_reset"] = True
         last[c.marker_type] = c.marker_value
 
 
@@ -526,20 +360,7 @@ def analyze_heading_groups(
     text: str,
     config: ChunkingConfig,
 ) -> dict[str, Any]:
-    """見出しタイプごとに統計を計算し、階層推定の材料を作る。
-
-    実施内容:
-      - タイプ別グルーピング
-      - 出現位置ギャップ、平均インデント、行長、連番性を算出
-      - その後、タイプ間の内包関係・番号リセット傾向を追加算出
-
-    呼び出し元:
-      - split_for_rag_structure_aware()
-      - main()
-    呼び出し先:
-      - _compute_sequence_score()
-      - _compute_containment_and_reset()
-    """
+    """見出しタイプごとに統計を計算し、階層推定の材料を作る。"""
     if not candidates:
         return {}
 
@@ -552,12 +373,9 @@ def analyze_heading_groups(
 
     for mtype, group in groups.items():
         positions = [c.start_char for c in group]
-        count = len(group)
         gaps = [positions[i + 1] - positions[i] for i in range(len(positions) - 1)]
         avg_gap = statistics.mean(gaps) if gaps else float(text_len)
-        median_gap = statistics.median(gaps) if gaps else float(text_len)
         avg_indent = statistics.mean(c.indent for c in group)
-        avg_len = statistics.mean(c.line_length for c in group)
         seq_score = _compute_sequence_score(group)
         shallow_indent_score = max(0.0, 1.0 - avg_indent / 10.0)
 
@@ -565,18 +383,14 @@ def analyze_heading_groups(
         fallback_priority = rule.priority if rule else 1
 
         stats[mtype] = {
-            "count": count,
-            "average_line_length": avg_len,
-            "average_indent": avg_indent,
+            "count": len(group),
             "positions": positions,
             "average_gap": avg_gap,
-            "median_gap": median_gap,
             "sequence_score": seq_score,
             "containment_score": 0.0,
             "reset_score": 0.0,
             "shallow_indent_score": shallow_indent_score,
             "fallback_priority": fallback_priority,
-            "confidence": 0.0,
         }
 
     _compute_containment_and_reset(stats, groups, text_len)
@@ -584,11 +398,7 @@ def analyze_heading_groups(
 
 
 def _compute_sequence_score(group: list[HeadingCandidate]) -> float:
-    """候補列の番号連続性を 0.0-1.0 のスコアで返す。
-
-    呼び出し元:
-      - analyze_heading_groups()
-    """
+    """候補列の番号連続性を 0.0-1.0 のスコアで返す。"""
     values = [c.marker_value for c in group if isinstance(c.marker_value, int)]
     if len(values) < 2:
         return 0.5
@@ -607,11 +417,7 @@ def _compute_containment_and_reset(
     groups: dict[str, list[HeadingCandidate]],
     text_len: int,
 ) -> None:
-    """タイプA区間にタイプBが何件入るかを使って内包/リセット傾向を計算する。
-
-    呼び出し元:
-      - analyze_heading_groups()
-    """
+    """タイプA区間にタイプBが何件入るかを使って内包/リセット傾向を計算する。"""
     types = list(stats.keys())
     sentinel = text_len + 1
 
@@ -662,18 +468,7 @@ def infer_heading_levels(
     group_stats: dict[str, Any],
     config: ChunkingConfig,
 ) -> list[HeadingCandidate]:
-    """候補の見出しタイプから階層レベル(level)を推定して付与する。
-
-    実施内容:
-      - 統計が無い/推定無効時はデフォルトlevelを適用
-      - 出現間隔・内包・リセット・連番・インデント等を統合して外側スコア化
-      - タイプごとに level を割当て、各候補へ反映
-      - 推定根拠を inference_reason に保存
-
-    呼び出し元:
-      - split_for_rag_structure_aware()
-      - main()
-    """
+    """候補の見出しタイプから階層レベル(level)を推定して付与する。"""
     if not candidates:
         return candidates
 
@@ -681,7 +476,6 @@ def infer_heading_levels(
         for c in candidates:
             rule = next((r for r in DEFAULT_HEADING_RULES if r.name == c.marker_type), None)
             c.inferred_level = rule.default_level_hint if rule else 4
-            c.inference_reason = {"fallback": "no_stats_or_disabled"}
         return candidates
 
     # min_group_count 未満のタイプはランキングから除外しデフォルト level_hint を使う
@@ -715,19 +509,10 @@ def infer_heading_levels(
     }
 
     # フォールバックタイプには default_level_hint を使う
-    # ただし infer_types のどのlevelとも被らないよう調整する
-    used_levels = set(type_to_level.values())
     for mtype in fallback_types:
         rule = next((r for r in DEFAULT_HEADING_RULES if r.name == mtype), None)
         hint = rule.default_level_hint if rule else config.max_depth
         type_to_level[mtype] = min(hint, config.max_depth)
-
-    # スコアの広がりからconfidenceを推定
-    scores = list(type_outer_score.values())
-    score_range = (max(scores) - min(scores)) if len(scores) >= 2 else 0.0
-    confidence_base = min(1.0, score_range / 5.0)
-    for mtype in group_stats:
-        group_stats[mtype]["confidence"] = confidence_base
 
     # 候補にlevel付与
     for c in candidates:
@@ -736,16 +521,6 @@ def infer_heading_levels(
             rule = next((r for r in DEFAULT_HEADING_RULES if r.name == c.marker_type), None)
             lv = rule.default_level_hint if rule else 4
         c.inferred_level = min(lv, config.max_depth)
-        st = group_stats.get(c.marker_type, {})
-        c.inference_reason = {
-            "type_outer_score": round(type_outer_score.get(c.marker_type, 0.0), 4),
-            "containment_score": round(st.get("containment_score", 0.0), 4),
-            "reset_score": round(st.get("reset_score", 0.0), 4),
-            "sequence_score": round(st.get("sequence_score", 0.0), 4),
-            "shallow_indent_score": round(st.get("shallow_indent_score", 0.0), 4),
-            "fallback_priority": st.get("fallback_priority", 0),
-            "fallback_used": c.marker_type in fallback_types,
-        }
 
     return candidates
 
@@ -762,19 +537,10 @@ def build_section_tree(
 ) -> SectionNode:
     """推定済み見出し候補から親子構造のセクションツリーを構築する。
 
-    実施内容:
-      - 文書ルートノード生成
-      - 各候補のテキスト範囲(end)計算
-      - スタックで親子関係を解決しながらノード追加
-      - 見出しが無ければ段落フォールバックを適用
-
-    呼び出し元:
-      - split_for_rag_structure_aware()
-      - main()
-    呼び出し先:
-      - _section_id()
-      - _candidate_confidence()
-      - _add_paragraph_fallback()
+    最後に _rebuild_tree_by_hints() を呼び、heading_type のルール上の階層
+    (default_level_hint) でツリーを正規化する。これにより infer_heading_levels
+    の統計推論で生じうる level 衝突 (例: numeric_dot が条と同 level になる)
+    を解消し、親チャンクの分割境界を常に条レベルに揃える。
     """
     if config is None:
         config = ChunkingConfig()
@@ -787,12 +553,9 @@ def build_section_tree(
         heading=first_line,
         heading_type="document_root",
         level=0,
-        ordinal=None,
         text="",
         start_char=0,
-        end_char=text_len,
         parent_id=None,
-        confidence=1.0,
     )
 
     valid = [c for c in candidates if c.inferred_level is not None]
@@ -823,13 +586,9 @@ def build_section_tree(
             heading=cand.text,
             heading_type=cand.marker_type,
             level=cand.inferred_level,
-            ordinal=cand.marker_value if isinstance(cand.marker_value, int) else None,
             text=sec_text,
             start_char=cand.start_char,
-            end_char=end,
             parent_id=None,
-            confidence=_candidate_confidence(cand),
-            inference_reason=cand.inference_reason,
         )
 
         # スタックを現在level以上の要素をpopする
@@ -843,35 +602,81 @@ def build_section_tree(
 
     # rootのtextは最初の見出し直前のテキスト(前文)
     root.text = text[: valid[0].start_char]
-    root.end_char = text_len
+
+    # 後処理: heading_type のルール階層 (default_level_hint) に基づいてツリーを
+    # 再構築し、親 (章) 配下の sub-item 混入による分割崩れを防ぐ。
+    _rebuild_tree_by_hints(root, text, config.max_depth)
 
     return root
 
 
-def _candidate_confidence(cand: HeadingCandidate) -> float:
-    """推定根拠スコアからノード信頼度を算出する。
+def _rebuild_tree_by_hints(root: SectionNode, full_text: str, max_depth: int) -> None:
+    """ツリー配下を heading_type の default_level_hint に基づいて再構築する。
 
-    呼び出し元:
-      - build_section_tree()
+    狙い:
+      infer_heading_levels のグローバル統計推論では、
+        - 章 (1 件のみで fallback) と条 (infer top) が同じ level 1 に並ぶ
+        - numeric_dot (`2.`) のような sub-item が偶発的に条と同 level 2 に並ぶ
+      といった現象が起き、親チャンク (章) の境界に sub-item が混ざって
+      _group_items_balanced の分割が崩れる。
+      ここでは「各 heading_type のルール上の階層 (default_level_hint)」を
+      真値とみなしてツリーを組み直し、章 (h=1) > 条 (h=2) > 番号付き (h=4)
+      の関係を強制する。これにより親チャンクの分割境界が常に条レベルで揃う。
+
+    手順:
+      1. 既存ツリーの全ノードを document order に flat 化
+      2. 各ノードの level = hint (max_depth でキャップ)
+      3. build_section_tree と同じスタックベースで親子を再構築
+      4. children の入れ替えに伴って各ノードの text 範囲を再計算
     """
-    ir = cand.inference_reason
-    if not ir:
-        return 0.5
-    return round(
-        min(1.0,
-            ir.get("containment_score", 0.0) * 0.4
-            + ir.get("sequence_score", 0.0) * 0.3
-            + ir.get("reset_score", 0.0) * 0.2
-            + ir.get("shallow_indent_score", 0.0) * 0.1
-        ),
-        4,
-    )
+    nodes: list[SectionNode] = []
+
+    def _collect(n: SectionNode) -> None:
+        for c in n.children:
+            nodes.append(c)
+            _collect(c)
+
+    _collect(root)
+    if not nodes:
+        return
+    nodes.sort(key=lambda n: n.start_char)
+
+    # 旧 children 関係をクリア (root + 全ノード)
+    root.children = []
+    for n in nodes:
+        n.children = []
+
+    # スタックベースで再構築
+    hints = {r.name: r.default_level_hint for r in DEFAULT_HEADING_RULES}
+    stack: list[tuple[int, SectionNode]] = [(root.level, root)]
+    for n in nodes:
+        n.level = min(hints.get(n.heading_type, max_depth), max_depth)
+        while len(stack) > 1 and stack[-1][0] >= n.level:
+            stack.pop()
+        parent_node = stack[-1][1]
+        n.parent_id = parent_node.id
+        parent_node.children.append(n)
+        stack.append((n.level, n))
+
+    # children の再 attach に伴い text 範囲を再計算する
+    # (各ノードの text は [start_char, 次 sibling の start_char or 親 end))
+    text_len = len(full_text)
+
+    def _recompute_text(n: SectionNode, end_char: int) -> None:
+        if n.heading_type != "document_root":
+            n.text = full_text[n.start_char:end_char]
+        children = sorted(n.children, key=lambda c: c.start_char)
+        for i, c in enumerate(children):
+            child_end = children[i + 1].start_char if i + 1 < len(children) else end_char
+            _recompute_text(c, child_end)
+
+    _recompute_text(root, text_len)
 
 
 def _add_paragraph_fallback(root: SectionNode, text: str) -> None:
     """見出しが存在しない場合、段落単位でchildrenを作る。"""
     char_pos = 0
-    for i, para in enumerate(re.split(r"\n{2,}", text)):
+    for para in re.split(r"\n{2,}", text):
         para_len = len(para)
         if para.strip():
             node = SectionNode(
@@ -879,13 +684,9 @@ def _add_paragraph_fallback(root: SectionNode, text: str) -> None:
                 heading="",
                 heading_type="paragraph",
                 level=1,
-                ordinal=i,
                 text=para,
                 start_char=char_pos,
-                end_char=char_pos + para_len,
                 parent_id=root.id,
-                confidence=0.3,
-                inference_reason={"fallback": "paragraph"},
             )
             root.children.append(node)
         char_pos += para_len + 2  # +2 for \n\n
@@ -897,11 +698,7 @@ def _add_paragraph_fallback(root: SectionNode, text: str) -> None:
 
 
 def _split_text_evenly(text: str, max_chars: int) -> list[str]:
-    """テキストを max_chars 以下でなるべく均等な長さに分割する。
-
-    呼び出し元:
-      - flatten_chunks() 内の _emit_parent() / _emit_child()
-    """
+    """テキストを max_chars 以下でなるべく均等な長さに分割する。"""
     text = text.strip()
     if not text or len(text) <= max_chars:
         return [text] if text else []
@@ -921,16 +718,11 @@ def _group_items_balanced(
     """サイズ配列を max_per_group 以下のグループに均等分割し、
     各グループに属するアイテムのインデックスリストを返す。
 
-    呼び出し元:
-      - flatten_chunks() 内の _emit_parent()
-
     分割方針:
       - 合計 total が max 以下なら 1 グループにまとめる
       - そうでなければ n = ceil(total / max) を最小分割数とし、
         target = ceil(total / n) を均等ターゲットにする
       - 子のサイズを順に積み、target 到達 or max 到達で次のグループへ
-      - これにより「子境界を尊重」「max_per_group 以下」「均等に近い」
-        の3条件を素直に両立できる
     """
     if not item_sizes:
         return []
@@ -963,22 +755,6 @@ def _group_items_balanced(
     return groups
 
 
-def _chunk_role_for_node(node: SectionNode) -> str:
-    """ノードの heading_type / level からチャンクの役割を判定する。
-
-    呼び出し元:
-      - default_metadata_builder()
-    """
-    if node.heading_type == "paragraph":
-        return "fallback"
-    if node.level == 1:
-        return "parent"
-    if node.level == 2:
-        return "child"
-    # level>=3 は通常独立チャンクにしないが、safety net として child 扱い
-    return "child"
-
-
 def default_metadata_builder(
     *,
     chunk_id: str,
@@ -990,61 +766,45 @@ def default_metadata_builder(
     split_index: int = 0,
     split_total: int = 1,
 ) -> dict[str, Any]:
-    """既定の metadata builder。チャンクの親子構造情報を生成する。
-
-    呼び出し元:
-      - flatten_chunks() (metadata_builder 未指定時)
+    """既定の metadata builder。最低限の検索/系統情報のみ生成する。
 
     差し替え方法:
       chunker.py 等で独自フィールド (doc_id, source 等) を含めたい場合は、
       本関数と同じシグネチャ (キーワード引数のみ) を持つ関数を作成し、
       flatten_chunks() / split_for_rag_structure_aware() の
-      metadata_builder 引数に渡す。差し替え時は本関数を内部で呼び出して
-      ベース dict を取得し、独自フィールドをマージする実装を推奨する。
+      metadata_builder 引数に渡す。
     """
+    # heading_type=="paragraph" は見出し抽出失敗時のフォールバック扱い。
+    # level>=3 のノードは通常独立チャンク化しないが safety net として child へ寄せる。
+    if node.heading_type == "paragraph":
+        chunk_role = "fallback"
+    elif node.level == 1:
+        chunk_role = "parent"
+    else:
+        chunk_role = "child"
+
     return {
         "chunk_id": chunk_id,
         "parent_id": section_parent_id,
-        # v3 互換のため残置 (v4 では使用しない)
-        "grandparent_id": None,
         "root_id": doc_root_id,
-        "children_ids": [],
         "level": node.level,
-        "chunk_role": _chunk_role_for_node(node),
-        "heading": node.heading,
-        "heading_type": node.heading_type,
-        "path": path,
         "path_text": " > ".join(path),
-        "ordinal": node.ordinal,
-        "start_char": node.start_char,
-        "end_char": node.end_char,
-        "source_type": "txt",
+        "chunk_role": chunk_role,
         "chunking_strategy": "structure_aware_v4",
-        "structure_confidence": node.confidence,
-        "inference_reason": node.inference_reason,
-        "split_index": split_index,
-        "split_total": split_total,
-        "ancestor_chain": ancestor_chain,
     }
 
 
-def _has_multiline_body(text: str, heading: str) -> bool:
-    """条のテキストから先頭の見出しを除いた本文が、空行を除いて2行以上あるかを判定。
+def _meaningful_body_lines(text: str, heading: str) -> int:
+    """ノードのテキストから先頭の見出し行を除いた本文の、空白行を除いた行数。
 
-    呼び出し元:
-      - flatten_chunks() 内の _emit_child()
-
-    判定ルール:
-      - text の先頭が heading に一致するなら、その分を除外して本文を取り出す
-      - 本文を行分割して、空白のみの行を除外した残りが 2 行以上なら True
-      - 1 行しかない条 (例: 第22条 のような単一段落) は子チャンク化対象外となる
-      - 「不要な空行」が混じっていても、空行は除外されるので影響しない
+    - >= 2 → 「複数行本文あり」(従来の _has_multiline_body 相当)
+    - >= 1 → 本文に何らかの内容がある (昇格採用時の最低条件)
+    - == 0 → 見出しのみで本文が空 (昇格対象でも子チャンク化しない)
     """
     body = text.strip()
     if heading and body.startswith(heading):
         body = body[len(heading):]
-    meaningful = [ln for ln in body.split("\n") if ln.strip()]
-    return len(meaningful) >= 2
+    return sum(1 for ln in body.split("\n") if ln.strip())
 
 
 def flatten_chunks(
@@ -1055,36 +815,17 @@ def flatten_chunks(
     """セクションツリーをRAG投入用チャンク配列へ平坦化する。
 
     分割戦略 (structure_aware_v4):
-      - level==1 のノード (章相当) を「親チャンク」として出力する。
-        サイズが max_chunk_chars 以内なら 1 チャンク、超過時は子(条)境界を
-        尊重した均等分割を行う (子は分割されない)。各分割チャンクの先頭に
-        は親見出し (章ヘッダ + 章先頭の本文) を必ず付与する。
-        附則のような少数構造でも level 推論で 1 と判定されたものは
-        同様に親チャンクとして扱う (「1の層」共通認識)。
-      - level==2 のノード (条相当) を「子チャンク」として出力する。
-        ただし、見出し行を除いた本文に空行を除いて 2 行以上残るもののみ
-        子チャンク化する (単一段落で完結する条はノイズ抑制のため除外)。
-      - 子チャンクのサイズが max_chunk_chars を超える場合は、条の見出しを
-        各分割チャンクの先頭に付与しつつ均等分割する (条は通常分割しない
-        が、超過時のみフォールバックとして文字数ベースで均等分割)。
-      - level>=3 のノード (列挙等) は独立したチャンクにしない。
-        親/子チャンクの本文に内包されるかたちで保持される。
-      - 親-子の階層情報は ancestor_chain / parent_id で表現する。
+      - level==1 (章相当) を親チャンクとして出力。max_chunk_chars 超過時は
+        子(条)境界を尊重した均等分割を行い、各分割の先頭に章見出し prefix
+        を付与する。
+      - level==2 (条相当) を子チャンクとして出力。基準は本文 (見出しを除いた
+        部分) が空行を除いて 2 行以上あること。
+        加えて、親章内に基準を満たす同種ノード (同 heading_type) が
+        1 つでも存在する場合は、本文 1 行のみの条も昇格採用する。
+        ただし見出しのみ (本文 0 行) のノードは昇格対象でも除外する。
+      - 条単独で max_chunk_chars 超過時のみ見出し付きで均等分割する。
+      - level>=3 のノードは独立チャンク化せず親/子チャンク本文に含める。
       - 0 件時は最低 1 チャンクを補償する。
-
-    引数:
-      metadata_builder: チャンク metadata の生成関数。None なら
-        default_metadata_builder を使用。chunker.py 等から差し替えて
-        独自フィールド (doc_id 等) をマージできる。
-
-    呼び出し元:
-      - split_for_rag_structure_aware()
-      - main()
-    呼び出し先:
-      - default_metadata_builder()
-      - _has_multiline_body()
-      - _group_items_balanced()
-      - _split_text_evenly()
     """
     if metadata_builder is None:
         metadata_builder = default_metadata_builder
@@ -1102,7 +843,6 @@ def flatten_chunks(
         split_index: int = 0,
         split_total: int = 1,
     ) -> dict[str, Any]:
-        # metadata_builder へキーワード引数で委譲。差し替え可能設計。
         return metadata_builder(
             chunk_id=chunk_id,
             node=node,
@@ -1115,6 +855,8 @@ def flatten_chunks(
         )
 
     def _ancestor_entry(node: SectionNode) -> dict[str, Any]:
+        # default builder の metadata には含めないが、差し替え builder が
+        # 利用する可能性に備えて引数として渡し続ける。
         return {
             "id": f"chunk_{node.id}",
             "heading": node.heading,
@@ -1143,7 +885,6 @@ def flatten_chunks(
             return
 
         # --- 章サイズ超過: 子(条)境界で均等分割 ---
-        # 章 prefix = 「章見出し + 最初の条までの本文」。各分割の先頭に付与する。
         children_with_text = [c for c in node.children if c.text.strip()]
         if children_with_text:
             first_child = children_with_text[0]
@@ -1189,13 +930,25 @@ def flatten_chunks(
             })
 
     def _emit_child(node: SectionNode, ancestors: list[SectionNode]) -> None:
-        # level==2 (条) を子チャンクとして出力 (本文が複数行のもののみ)
+        # level==2 (条) を子チャンクとして出力
         text = node.text.strip()
         if not text or len(text) < config.min_child_text_length:
             return
-        if not _has_multiline_body(text, node.heading):
-            # 単一段落の条 (例: 第22条) は子チャンク化しない
-            return
+
+        body_lines = _meaningful_body_lines(text, node.heading)
+        if body_lines < 2:
+            # 親章内に「複数行本文を持つ同種ノード」が 1 つでもあれば本文 1 行の条も
+            # 昇格して子チャンク化する。法規類で 2 行以上の条と 1 行の条が混在する
+            # 章で、後者だけ漏れるのを防ぐための救済措置。
+            # ただし見出しのみ (本文 0 行) のノードは検索ノイズ抑制のため除外。
+            parent = ancestors[-1] if ancestors else None
+            promoted = bool(parent) and any(
+                _meaningful_body_lines(c.text.strip(), c.heading) >= 2
+                for c in parent.children
+                if c.heading_type == node.heading_type
+            )
+            if not promoted or body_lines == 0:
+                return
 
         ancestor_chain = [_ancestor_entry(a) for a in ancestors]
         path = [root.heading] + [a.heading for a in ancestors] + [node.heading]
@@ -1291,20 +1044,7 @@ def split_for_rag_structure_aware(
     config: ChunkingConfig | None = None,
     metadata_builder: MetadataBuilder | None = None,
 ) -> list[dict]:
-    """構造認識チャンク化のエントリーポイント。
-
-    引数:
-      metadata_builder: チャンク metadata の生成関数。None なら
-        default_metadata_builder を使用。chunker.py 等から差し替え可能。
-
-    呼び出し順:
-      normalize_text()
-      -> extract_heading_candidates()
-      -> analyze_heading_groups()
-      -> infer_heading_levels()
-      -> build_section_tree()
-      -> flatten_chunks(metadata_builder=...)
-    """
+    """構造認識チャンク化のエントリーポイント。"""
     if config is None:
         config = ChunkingConfig()
 
@@ -1316,22 +1056,10 @@ def split_for_rag_structure_aware(
                 "chunk_id": "chunk_empty",
                 "parent_id": None,
                 "root_id": "doc_empty",
-                "children_ids": [],
                 "level": 0,
-                "chunk_role": "fallback",
-                "heading": "",
-                "heading_type": "empty",
-                "path": [],
                 "path_text": "",
-                "ordinal": None,
-                "start_char": 0,
-                "end_char": 0,
-                "source_type": "txt",
+                "chunk_role": "fallback",
                 "chunking_strategy": "structure_aware_v4",
-                "structure_confidence": 0.0,
-                "inference_reason": {},
-                "ancestor_chain": [],
-                "grandparent_id": None,
             },
         }]
 
@@ -1343,17 +1071,6 @@ def split_for_rag_structure_aware(
     return flatten_chunks(root, config, metadata_builder=metadata_builder)
 
 
-def split_for_rag_texts_only(text: str) -> list[str]:
-    """text 本文のみを返す薄いラッパー。
-
-    呼び出し元:
-      - split_for_rag()
-    呼び出し先:
-      - split_for_rag_structure_aware()
-    """
-    return [c["text"] for c in split_for_rag_structure_aware(text) if c["text"]]
-
-
 def split_for_rag(
     *, text: str, chunk_size: int = 800, chunk_overlap: int = 0
 ) -> list[str]:
@@ -1362,46 +1079,13 @@ def split_for_rag(
     return [c["text"] for c in split_for_rag_structure_aware(text, config) if c["text"]]
 
 
-def split_for_rag_with_metadata(
-    *, text: str, chunk_size: int = 800, chunk_overlap: int = 0
-) -> list[dict[str, Any]]:
-    """metadata 付きスプリッタ（chunker.py から experiment_context 経由で利用される）。
-
-    返り値は [{"text": str, "metadata": dict}, ...] 形式。
-    default_metadata_builder が生成する structure_aware_v4 の親子チャンク情報
-    (chunk_role, ancestor_chain, path, parent_id 等) を metadata として保持する。
-    chunker.py 側で chunk_id / doc_id / source / document_lower の最低限デフォルト
-    を後付けするので、ここではロジック固有情報のみを返せばよい。
-
-    chunk_overlap は構造認識の性質上未使用 (引数互換のため受け取るのみ)。
-    """
-    config = ChunkingConfig(max_chunk_chars=chunk_size)
-    chunks = split_for_rag_structure_aware(text, config)
-    items: list[dict[str, Any]] = []
-    for c in chunks:
-        ctext = c.get("text", "")
-        if not ctext:
-            continue
-        items.append(
-            {
-                "text": ctext,
-                "metadata": dict(c.get("metadata") or {}),
-            }
-        )
-    return items
-
-
 # ============================================================
 # CLI
 # ============================================================
 
 
 def _print_tree(node: SectionNode, indent: int = 0) -> None:
-    """デバッグ表示用にセクションツリーを再帰出力する。
-
-    呼び出し元:
-      - main()  # --print-tree 指定時
-    """
+    """デバッグ表示用にセクションツリーを再帰出力する。"""
     prefix = "  " * indent
     label = node.heading[:60] if node.heading else "(no heading)"
     print(f"{prefix}[L{node.level}:{node.heading_type}] {label}")
@@ -1410,14 +1094,7 @@ def _print_tree(node: SectionNode, indent: int = 0) -> None:
 
 
 def main() -> None:
-    """CLI エントリーポイント。
-
-    処理フロー:
-      - 入力読み込み
-      - normalize -> candidate抽出 -> group解析 -> level推定
-      - ツリー構築 -> チャンク平坦化
-      - 集計・デバッグ表示・ファイル出力
-    """
+    """CLI エントリーポイント。"""
     parser = argparse.ArgumentParser(description="Structure-aware chunker")
     parser.add_argument("input", help="Input text file")
     parser.add_argument("--out", help="Output JSON file")
@@ -1426,7 +1103,7 @@ def main() -> None:
     parser.add_argument("--encoding", default="utf-8")
     args = parser.parse_args()
 
-    config = ChunkingConfig(debug=args.debug)
+    config = ChunkingConfig()
 
     with open(args.input, encoding=args.encoding) as f:
         raw_text = f.read()
@@ -1441,18 +1118,12 @@ def main() -> None:
     print(f"\n=== Structure Aware Chunker ===")
     print(f"total chunks: {len(chunks)}")
 
-    type_counts: dict[str, int] = defaultdict(int)
     level_counts: dict[int, int] = defaultdict(int)
     role_counts: dict[str, int] = defaultdict(int)
     for c in chunks:
         m = c["metadata"]
-        type_counts[m["heading_type"]] += 1
         level_counts[m["level"]] += 1
         role_counts[m["chunk_role"]] += 1
-
-    print("\n--- heading_type ---")
-    for t, cnt in sorted(type_counts.items()):
-        print(f"  {t}: {cnt}")
 
     print("\n--- level ---")
     for lv, cnt in sorted(level_counts.items()):
@@ -1485,11 +1156,6 @@ def main() -> None:
                 f"indent={st['shallow_indent_score']:.2f} "
                 f"pri={st['fallback_priority']}"
             )
-
-        fallback_used = any(
-            c["metadata"]["inference_reason"].get("fallback_used") for c in chunks
-        )
-        print(f"\nfallback_used: {fallback_used}")
 
     if args.print_tree:
         print("\n=== section tree ===")
