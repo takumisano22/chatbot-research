@@ -4,3 +4,5 @@ RP-test-0001.yaml
 RP-test-0002.yaml
 RP-test-0003.yaml
 RP-test-0004.yaml
+RP-test-0005.yaml
+RP-test-0006.yaml
