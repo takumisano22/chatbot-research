@@ -1,0 +1,22 @@
+# docling ライブラリで取り込み～チャンク化まで一括実行するサンプル。
+# ingest_pipeline_id 指定時は SUPERSEDES に基づき converters / normalizer / logic.chunking が skip される。
+# chunking_logic_id は形式上必須だが、SUPERSEDES=("convert","normalize","chunking") により無視される。
+research_pair_id: RP-Q-0002
+llm_model: qwen2.5:7b
+embedding_provider: ruri_http
+embedding_base_url: http://host.docker.internal:8010
+embedding_model: cl-nagoya/ruri-v3-310m
+
+ingest_pipeline_id: docling_library
+
+search_logic_id: logic_01
+chunking_logic_id: logic_01  # doclingライブラリでは実質無視される
+reranking_logic_id: logic_01
+tokenizer_logic_id: logic_01
+prompt_logic_id: logic_05
+
+top_k: 4
+qa_dataset: standard_qa.json
+document_set_id: DOCSET-0001
+ragas_enabled: false
+langfuse_enabled: false
