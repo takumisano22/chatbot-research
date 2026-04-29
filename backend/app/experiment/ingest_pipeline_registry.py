@@ -112,10 +112,12 @@ def _validate_ingest_callable(mod: ModuleType) -> IngestFn:
             )
 
     # 戻り値アノテーションが int であることを確認（実行時の型は呼び出し側で再確認する）。
-    if sig.return_annotation is inspect.Signature.empty or sig.return_annotation is not int:
+    # `from __future__ import annotations` 有効時は "int"（文字列）になるため両方許容する。
+    return_ann = sig.return_annotation
+    if return_ann is inspect.Signature.empty or return_ann not in (int, "int"):
         raise TypeError(
             f"{mod.__name__}.ingest の戻り値アノテーションは int である必要があります"
-            f"（現値: {sig.return_annotation!r}）"
+            f"（現値: {return_ann!r}）"
         )
 
     return fn  # type: ignore[return-value]
