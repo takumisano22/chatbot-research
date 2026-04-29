@@ -5,7 +5,16 @@ WORKDIR /app
 ENV PYTHONUNBUFFERED=1
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libxcb1 \
+    && apt-get install -y --no-install-recommends \
+        libxcb1 \
+        libgl1 \
+        libglib2.0-0 \
+        libsm6 \
+        libxext6 \
+        libxrender1 \
+        tesseract-ocr \
+        tesseract-ocr-eng \
+        tesseract-ocr-jpn \
     && rm -rf /var/lib/apt/lists/*
 
 COPY backend/pyproject.toml .
