@@ -1,23 +1,47 @@
 # chatbot-research
 
-FastAPI ベースのチャット / RAG 実験用リポジトリです。通常の API 起動に加え、**research_pair を 1 つ指定した一括 RAG 実験**を Docker から実行できます。
+RAG 実験バッチ用のリポジトリです。`research_pair` を 1 つ指定して、**Chroma リセット -> 文書取り込み -> QA 一括推論 -> CSV/JSON 出力**を Docker で実行できます。
 
-## クイックスタート（実験バッチ）
+## できること
 
-1. `.env.example` を `.env` にコピーし、ホスト上の LLM（例: Ollama）や Langfuse、ベクトルストア接続を設定する。
-2. `ingest_document/<document_set_id>/` に PDF を置く。
-3. `qa_datasets/` に質問 JSON を置き、`research_pairs/*.yaml` で `qa_dataset` / `document_set_id` / `top_k` 等を指定する。
-4. 実行:
+- `research_pairs/*.yaml`（または JSON）で実験条件を定義
+- `qa_datasets/*.json` の質問セットを一括実行
+- `ingest_document/<document_set_id>/**/*.pdf` を取り込み
+- 結果を `outputs/csv/` と `outputs/json/` に保存
+
+## クイックスタート
+
+1. `.env.example` を `.env` にコピーして接続先を設定する（LLM / embedding / Langfuse / vector store）。
+2. `qa_datasets/` に質問データ、`ingest_document/<document_set_id>/` に PDF を配置する。
+3. `research_pairs/*.yaml` に `research_pair_id`, `qa_dataset`, `document_set_id`, `top_k` などを記述する。
+4. リポジトリルートで実行する。
 
 ```bash
 docker compose run --rm experiment_runner --research-pair RP-0001
 ```
 
-詳細は [docs/experiment_batch.md](docs/experiment_batch.md) を参照してください。
+成功時は、生成された CSV の絶対パスが標準出力に 1 行で表示されます。
 
-RAG 検索の実装窓口は `backend/app/rag/logic/search/__init__.py` の `search_documents` です（`retrieval_service` は互換の再エクスポート）。
+## GitHub Actions での実行
 
-## その他
+- GitHub Actions（self-hosted runner）からも同じコマンドで実行できます。
+- runner 上で本リポジトリをチェックアウトし、`.env` と実験データ（`research_pairs/`, `qa_datasets/`, `ingest_document/`）を配置して実行します。
+- ワークフロー例は `.github/workflows/run-batch-and-store.yaml` を参照してください。
 
-- アプリ本体・API: `backend/`
-- Compose: `compose.yaml`
+```bash
+docker compose -f compose.yaml run --rm experiment_runner --research-pair RP-0001
+```
+
+## ディレクトリ概要
+
+- `backend/`: 実験バッチ本体（`python -m app.experiment.runner`）
+- `compose.yaml`: `vector_store` + `experiment_runner` の実行定義
+- `research_pairs/`: 実験条件ファイル
+- `qa_datasets/`: 質問 JSON
+- `ingest_document/`: 取り込み対象 PDF
+- `outputs/`: 実験結果（CSV / JSON）
+
+
+## 詳細ドキュメント
+
+実験設定、`research_pair` スキーマ、CSV 列の詳細は [docs/experiment_batch.md](docs/experiment_batch.md) を参照してください。
