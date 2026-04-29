@@ -86,6 +86,10 @@ SCOPE_W_SEQUENCE = 2.5
 SCOPE_W_COVERAGE = 1.5
 SCOPE_W_FREQUENCY = 0.7
 SCOPE_W_PRIORITY = 0.5
+# 上位スコープで「次点（=採用 hint より内側で最高スコア）」と認定されたタイプに、
+# 直下スコープ評価でのみ与える bias。少数派の条が numeric_paren 多数派に競り負け
+# て章直下に出てこないケースで、章 → 条 → 列挙の階層を保つために使う。
+SCOPE_W_PREFERRED = 2.0
 SCOPE_HEAD_ZONE = 0.15             # 「スコープ先頭付近」判定の共通比率
 SCOPE_COVERAGE_SOLO_HEAD = 1.0     # 単独で先頭付近にあるときの coverage
 SCOPE_COVERAGE_SOLO_OTHER = 0.3    # 単独で先頭付近以外にあるときの coverage
@@ -171,7 +175,7 @@ DEFAULT_HEADING_RULES: list[HeadingRule] = [
     HeadingRule("japanese_article", r"^第[0-9一二三四五六七八九十百千〇]+条", 2),  # 第1条, 第十二条
     HeadingRule("japanese_section", r"^第[0-9一二三四五六七八九十百千〇]+項", 3),  # 第1項, 第三項
     HeadingRule("decimal_number",  r"^\d+\.\d+", 3),                   # 1.1, 3.2.1
-    HeadingRule("numeric_dot",     r"^\d+[.)．]\s", 4),                # 1. , 2）
+    HeadingRule("numeric_dot",     r"^\d{1,2}[.)．](?!\d)", 4),        # 1. , 2．配偶者は…（空白なし可、最大 2 桁・小数/日付除外）
     HeadingRule("numeric_paren",   r"^[（(]\d+[)）]", 4),              # (1), （3）
     HeadingRule("japanese_paren",  r"^[（(][一二三四五六七八九十〇]+[)）]", 4),  # (一), （三）
     HeadingRule("roman",           r"^[IVX]{1,5}[.)]\s|^[Ⅰ-Ⅻ]\s", 4),  # III. , Ⅱ
@@ -319,6 +323,7 @@ def _hint_for_type(mtype: str) -> int:
 # - 行内に埋め込まれた強見出しを行分割（"...する。第10条..." → 2 行へ分離）
 # - 強見出し前の空行挿入（後段の after_blank 判定を効かせる）
 # - 見出し直後の二重改行詰め直し（構造文書専用）
+# - 連番列挙アイテム間の空行のみのギャップ詰め（章チャンク経路にも効かせる）
 # 改行コード統一・全/半角・行末空白・連続空行圧縮は別工程で済んでいる前提。
 def normalize_text(text: str, config: ChunkingConfig | None = None) -> str:
     if not text:
@@ -329,7 +334,11 @@ def normalize_text(text: str, config: ChunkingConfig | None = None) -> str:
         lines = _split_embedded_headings(lines)
     lines = _ensure_blank_before_headings(lines)
     normalized = "\n".join(lines)
-    return _split_heading_linebreaks(normalized)
+    normalized = _split_heading_linebreaks(normalized)
+    # 章チャンク（_emit_parent 経路）でも列挙の空行が詰まるよう、ここで一括適用する。
+    # 子チャンク経路（_emit_child）でも保険として再呼び出しするが操作は冪等。
+    normalized = _collapse_enumeration_blanks(normalized)
+    return normalized
 
 
 # 行内に埋め込まれた強い見出し ("...する。第10条（服務）...") を行分割する。
@@ -392,7 +401,6 @@ def _split_heading_linebreaks(text: str) -> str:
 
 
 # 行頭ルールマッチを軽量に判定する分類器。スコアリングは行わない。
-# _collapse_enumeration_blanks（連番ヘッダー間の空行詰め）の判定で使用。
 def _classify_heading_line(line: str) -> tuple[str, int | str | None] | None:
     stripped = line.lstrip()
     if not stripped:
@@ -404,19 +412,46 @@ def _classify_heading_line(line: str) -> tuple[str, int | str | None] | None:
     return None
 
 
-# 連番ヘッダー（1., 2., 3. 等）アイテム間の「空行のみ」隙間を詰める。
+# 列挙項目（数字+点 / 括弧数字 / 括弧漢数字）の種類と番号を返す。
+# DEFAULT_HEADING_RULES の numeric_dot と同じ「最大 2 桁・小数/日付を除外」条件で、
+# 空行詰めの判定を見出し抽出と一貫させる。章・条等の強見出しは対象外（章/条同士の
+# 空行は段落区切りとして残したい）。
+_ENUM_NUMERIC_DOT_RE = re.compile(r"^(\d{1,2})[.)．](?!\d)")
+_ENUM_NUMERIC_PAREN_RE = re.compile(r"^[（(](\d+)[)）]")
+_ENUM_JAPANESE_PAREN_RE = re.compile(r"^[（(]([一二三四五六七八九十〇]+)[)）]")
+
+
+def _classify_enum_item(line: str) -> tuple[str, int] | None:
+    stripped = line.lstrip()
+    if not stripped:
+        return None
+    m = _ENUM_NUMERIC_DOT_RE.match(stripped)
+    if m:
+        return ("numeric_dot", int(m.group(1)))
+    m = _ENUM_NUMERIC_PAREN_RE.match(stripped)
+    if m:
+        return ("numeric_paren", int(m.group(1)))
+    m = _ENUM_JAPANESE_PAREN_RE.match(stripped)
+    if m:
+        n = _kanji_to_int(m.group(1))
+        if n is not None:
+            return ("japanese_paren", n)
+    return None
+
+
+# 連番列挙アイテム（1., 2., (1), (2) 等）間の「空行のみ」隙間を詰める。
 # OCR 等で混入する余計な空行を補正する目的。本文段落が挟まる場合は段落区切りとして残す。
-# 詰める条件: 同タイプ + marker_value が +1 連続。
+# 詰める条件: 同タイプ + 番号 +1 連続。章・条等の強見出しは対象外（誤って詰めると
+# 別ノードの境界を飲み込んでしまうため）。
 def _collapse_enumeration_blanks(text: str) -> str:
     lines = text.split("\n")
     result: list[str] = []
     i = 0
     while i < len(lines):
         result.append(lines[i])
-        cur = _classify_heading_line(lines[i])
+        cur = _classify_enum_item(lines[i])
 
-        # 連番判定可能（marker_value が int）なヘッダー行のみ詰め対象とする。
-        if cur is None or not isinstance(cur[1], int):
+        if cur is None:
             i += 1
             continue
 
@@ -426,11 +461,10 @@ def _collapse_enumeration_blanks(text: str) -> str:
             j += 1
 
         if j > i + 1 and j < len(lines):
-            nxt = _classify_heading_line(lines[j])
+            nxt = _classify_enum_item(lines[j])
             if (
                 nxt is not None
                 and nxt[0] == cur[0]
-                and isinstance(nxt[1], int)
                 and nxt[1] == cur[1] + 1
             ):
                 # i+1 〜 j-1 (空行のみ) を捨て、j を次ループで処理する。
@@ -841,9 +875,12 @@ def _rebuild_tree_by_recursive_scoring(
 # 手順:
 #   1) heading_type ごとにグルーピング
 #   2) 各 type をスコープ内で _score_type_in_scope() でスコア化
+#      （preferred_subtypes に該当する type には SCOPE_W_PREFERRED の bias を付与）
 #   3) 最高スコア type を採用。同 default_level_hint かつ正スコアの他 type も同 level に昇格
 #      （附則と章を level=1 へ並列配置するケースなど）
-#   4) 採用ノードに current_level を付与し、隣接採用ノード間の sub_scope を再帰評価
+#   4) 採用 type より「内側らしい」(default_level_hint がより大きい) 正スコア type の中から
+#      最高スコアの 1 つを次の sub_scope 用の preferred_subtypes として選出
+#   5) 採用ノードに current_level を付与し、隣接採用ノード間の sub_scope を再帰評価
 def _assign_levels_recursive(
     nodes: list[SectionNode],
     node_values: dict[str, int | str | None],
@@ -851,6 +888,8 @@ def _assign_levels_recursive(
     scope_end: int,
     current_level: int,
     max_depth: int,
+    *,
+    preferred_subtypes: frozenset[str] = frozenset(),
 ) -> None:
     if not nodes or current_level > max_depth:
         return
@@ -860,7 +899,10 @@ def _assign_levels_recursive(
         by_type[n.heading_type].append(n)
 
     scores: dict[str, float] = {
-        t: _score_type_in_scope(g, by_type, node_values, scope_start, scope_end)
+        t: _score_type_in_scope(
+            g, by_type, node_values, scope_start, scope_end,
+            preferred_types=preferred_subtypes,
+        )
         for t, g in by_type.items()
     }
 
@@ -877,6 +919,21 @@ def _assign_levels_recursive(
         t for t, s in scores.items()
         if _hint_for_type(t) == best_hint and s > 0.0
     }
+
+    # 採用 type より「内側らしい」(default_level_hint がより大きい) 正スコア type の中で
+    # 最高スコアの 1 つを次階層の予約として伝搬する。
+    # 章 (hint=1) が選ばれたら条 (hint=2) を、条が選ばれたら numeric_paren (hint=4) を
+    # 予約することで、少数派が多数派の列挙に競り負けて階層から落ちるのを防ぐ。
+    next_preferred: frozenset[str] = frozenset()
+    inner_candidates = [
+        (t, s) for t, s in scores.items()
+        if t not in chosen_types
+        and _hint_for_type(t) > best_hint
+        and s > 0.0
+    ]
+    if inner_candidates:
+        inner_candidates.sort(key=lambda x: x[1], reverse=True)
+        next_preferred = frozenset({inner_candidates[0][0]})
 
     chosen_nodes = sorted(
         [n for n in nodes if n.heading_type in chosen_types],
@@ -895,6 +952,7 @@ def _assign_levels_recursive(
             sub_others, node_values,
             sub_start, sub_end,
             current_level + 1, max_depth,
+            preferred_subtypes=next_preferred,
         )
 
 
@@ -905,12 +963,15 @@ def _assign_levels_recursive(
 #   - coverage    (SCOPE_W_COVERAGE)   : スコープ内の位置範囲（広いほど外側らしい）
 #   - frequency   (SCOPE_W_FREQUENCY)  : 出現数の log スケール（頻度の偏り抑制）
 #   - priority    (SCOPE_W_PRIORITY)   : ヘッダー語ヒント（tie-breaker）
+#   - preferred   (SCOPE_W_PREFERRED)  : 上位スコープで予約された次点 type への bias
 def _score_type_in_scope(
     group: list[SectionNode],
     all_groups: dict[str, list[SectionNode]],
     node_values: dict[str, int | str | None],
     scope_start: int,
     scope_end: int,
+    *,
+    preferred_types: frozenset[str] = frozenset(),
 ) -> float:
     if not group:
         return 0.0
@@ -944,12 +1005,18 @@ def _score_type_in_scope(
     # 5) ヘッダー語ヒント（tie-breaker のみ）
     priority_hint = _RULE_PRIORITY.get(group[0].heading_type, 0) / _PRIORITY_DIVISOR
 
+    # 6) 上位スコープからの「次点予約」bias。
+    # 章 → 条 → 列挙の階層構造を保つため、上位スコープで「内側で最も有力」と
+    # 認定された type に対し、直下スコープでのみ加点する（非伝搬）。
+    preferred_bonus = 1.0 if group[0].heading_type in preferred_types else 0.0
+
     return (
         containment * SCOPE_W_CONTAINMENT
         + seq * SCOPE_W_SEQUENCE
         + coverage * SCOPE_W_COVERAGE
         + freq * SCOPE_W_FREQUENCY
         + priority_hint * SCOPE_W_PRIORITY
+        + preferred_bonus * SCOPE_W_PREFERRED
     )
 
 
@@ -1132,6 +1199,10 @@ def _meaningful_body_lines(text: str, heading: str) -> int:
 #   - 子ノードの見出し行  → "## "
 #   - 列挙構造の見出し行  → "# "
 #   - それ以外            → そのまま
+# 加えて、同 heading_type で構造ツリーから漏れた行（候補スコア閾値で落ちた長文項目等）
+# は、子/孫として採用された type 集合と一致する場合に同じ記法を補完付与する。
+# 文字列完全一致では拾えないバラバラ付与（"1．要約 / 2．長文 / 3．要約" のような混在）
+# を防ぎつつ、構造ツリー外の行頭パターンを丸ごと拾うような強制マッピングは行わない。
 def _format_chunk_md(
     text: str,
     node: SectionNode,
@@ -1150,6 +1221,14 @@ def _format_chunk_md(
         for gc in child.children
         if gc.heading.strip()
     }
+    # 構造ツリーで child / grandchild として認識された heading_type の集合。
+    # 同 type なら、文字列マッチで漏れた行にも同じ記法を補完する根拠とする。
+    child_types: set[str] = {c.heading_type for c in node.children}
+    grandchild_types: set[str] = {
+        gc.heading_type
+        for child in node.children
+        for gc in child.children
+    }
 
     is_exceptional = (
         node.heading_type == "appendix"
@@ -1164,6 +1243,7 @@ def _format_chunk_md(
             result.append("")
             continue
 
+        # 1) ノード自身の見出し行
         if not heading_found and stripped == node_heading:
             heading_found = True
             if is_exceptional and is_parent:
@@ -1172,12 +1252,30 @@ def _format_chunk_md(
                 result.append(f"### {stripped}")
             else:
                 result.append(f"## {stripped}")
-        elif stripped in child_headings:
+            continue
+
+        # 2) 構造ツリーで採用された child / grandchild との文字列完全一致
+        if stripped in child_headings:
             result.append(f"## {stripped}" if is_parent else f"# {stripped}")
-        elif stripped in grandchild_headings:
+            continue
+        if stripped in grandchild_headings:
             result.append(f"# {stripped}")
-        else:
-            result.append(line)
+            continue
+
+        # 3) 採用された type と同じ heading_type の行は補完する。
+        # 章チャンクで child=条 が認識されていれば本文中の条文行（文字列ぶれや候補漏れ）
+        # を拾い、孫=列挙が認識されていれば長文の "2．..." も同じ記法に揃える。
+        line_class = _classify_heading_line(stripped)
+        if line_class is not None:
+            line_type = line_class[0]
+            if line_type in child_types:
+                result.append(f"## {stripped}" if is_parent else f"# {stripped}")
+                continue
+            if line_type in grandchild_types:
+                result.append(f"# {stripped}")
+                continue
+
+        result.append(line)
 
     return "\n".join(result)
 

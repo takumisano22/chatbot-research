@@ -32,7 +32,6 @@ def ingest(
     data: bytes,
     source: str,
 ) -> int:
-    _ = settings  # docling 側の設定は固定（YAGNI）。Settings はシグネチャ整合のため受け取るのみ。
     suffix = _suffix_lower(filename)
     if suffix not in _ALLOWED_SUFFIXES:
         raise ValueError(
@@ -40,7 +39,12 @@ def ingest(
             f"（対応: {sorted(_ALLOWED_SUFFIXES)})"
         )
 
-    chunks = _build_chunks_via_docling(filename=filename, data=data, source=source)
+    chunks = _build_chunks_via_docling(
+        settings=settings,
+        filename=filename,
+        data=data,
+        source=source,
+    )
 
     session.delete_by_source(source)
     session.add_chunks(chunks)
@@ -53,19 +57,37 @@ def ingest(
 
 
 def _build_chunks_via_docling(
-    *, filename: str, data: bytes, source: str
+    *, settings: Settings, filename: str, data: bytes, source: str
 ) -> list[ChunkForStore]:
     # docling は実験的経路でしか使わないため import は遅延する（依存欠落時の影響を最小化）。
     try:
-        from docling.chunking import HybridChunker
-        from docling.datamodel.base_models import DocumentStream
-        from docling.document_converter import DocumentConverter
+        from docling.datamodel.base_models import InputFormat  # pyright: ignore[reportMissingImports]
+        from docling.datamodel.pipeline_options import (  # pyright: ignore[reportMissingImports]
+            PdfPipelineOptions,
+            TesseractCliOcrOptions,
+        )
+        from docling.chunking import HybridChunker  # pyright: ignore[reportMissingImports]
+        from docling.datamodel.base_models import DocumentStream  # pyright: ignore[reportMissingImports]
+        from docling.document_converter import (  # pyright: ignore[reportMissingImports]
+            DocumentConverter,
+            PdfFormatOption,
+        )
     except ImportError as e:
         raise RuntimeError(
             "docling が未インストールです（pip install docling）。"
         ) from e
 
-    converter = DocumentConverter()
+    # 既存 Settings の PDF_OCR_LANG（例: jpn+eng）を docling の Tesseract OCR 設定へ反映する。
+    ocr_langs = _split_docling_ocr_langs(settings.pdf_ocr_lang)
+    pdf_pipeline_options = PdfPipelineOptions(
+        do_ocr=True,
+        ocr_options=TesseractCliOcrOptions(lang=ocr_langs),
+    )
+    converter = DocumentConverter(
+        format_options={
+            InputFormat.PDF: PdfFormatOption(pipeline_options=pdf_pipeline_options),
+        }
+    )
     stream = DocumentStream(name=filename, stream=io.BytesIO(data))
     result = converter.convert(stream)
     document = result.document
@@ -104,3 +126,10 @@ def _suffix_lower(filename: str) -> str:
 
 def _stable_doc_id(source_key: str) -> str:
     return hashlib.sha256(source_key.encode("utf-8")).hexdigest()[:16]
+
+
+def _split_docling_ocr_langs(raw: str) -> list[str]:
+    # "jpn+eng" / "jpn,eng" / "jpn eng" を許容。空なら既定を使う。
+    cleaned = (raw or "").replace("+", ",").replace(" ", ",")
+    items = [x.strip() for x in cleaned.split(",") if x.strip()]
+    return items if items else ["jpn", "eng"]
