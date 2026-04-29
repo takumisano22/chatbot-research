@@ -5,20 +5,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from app.rag.logic.experiment_context import (
-    get_split_for_rag,
-    get_split_for_rag_with_metadata,
-)
+from app.rag.logic.experiment_context import get_split_for_rag_with_metadata
 
 # -----------------------------------------------------------------------------
 # 役割: 全文をチャンクに分割し、ストア投入用メタデータ（doc_id / chunk_id / document_lower）を付与する。
 # 主な呼び出し元: ingest_pipeline.runner、取り込み処理全般。
 # 流れ:
-#   1) experiment_context.get_split_for_rag_with_metadata() があればそれを使い、
-#      ロジック側 metadata を取り込む（[{"text","metadata"}, ...]）。
-#   2) 無ければ get_split_for_rag() を使い、テキストのみのリストを得る。
-#   3) いずれの経路でも backend 側で chunk_id / doc_id / source / document_lower の
-#      最低限デフォルトを必ず付与する（ロジック側で metadata を作らなくても整合する）。
+#   1) experiment_context.get_split_for_rag_with_metadata() でロジック側 metadata 付き
+#      チャンク（[{"text": str, "metadata": dict}, ...]）を取得する。
+#   2) backend 側で chunk_id / doc_id / source / document_lower の
+#      最低限デフォルトを必ず付与する（ロジック側で metadata が空でも整合する）。
 # -----------------------------------------------------------------------------
 
 
@@ -82,24 +78,14 @@ class ChunkForStore:
 def _resolve_chunk_items(
     *, text: str, chunk_size: int, chunk_overlap: int
 ) -> list[dict[str, Any]]:
-    """metadata 付きスプリッタを優先利用し、無ければテキストのみで補完する。
-
-    返り値は常に [{"text": str, "metadata": dict}, ...] 形式に統一する。
-    """
-    split_with_meta = get_split_for_rag_with_metadata()
-    if split_with_meta is not None:
-        raw = split_with_meta(
-            text=text, chunk_size=chunk_size, chunk_overlap=chunk_overlap
-        )
-        return [
-            {"text": r.get("text", ""), "metadata": r.get("metadata") or {}}
-            for r in raw
-            if r.get("text")
-        ]
-    pieces = get_split_for_rag()(
+    raw = get_split_for_rag_with_metadata()(
         text=text, chunk_size=chunk_size, chunk_overlap=chunk_overlap
     )
-    return [{"text": p, "metadata": {}} for p in pieces if p]
+    return [
+        {"text": r.get("text", ""), "metadata": r.get("metadata") or {}}
+        for r in raw
+        if r.get("text")
+    ]
 
 
 def _stable_doc_id(source_key: str) -> str:

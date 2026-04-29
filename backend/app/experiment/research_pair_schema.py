@@ -35,6 +35,10 @@ class ResearchPair(BaseModel):
     tokenizer_logic_id: str = Field(..., min_length=1)
     prompt_logic_id: str = Field(..., min_length=1)
 
+    # ingest_pipeline/library/<id>.py を選択して取り込み処理を library 一括に切り替える。
+    # None: 既存の converters→normalize→chunking 経路を使う。
+    ingest_pipeline_id: str | None = Field(default=None, min_length=1)
+
     top_k: int = Field(..., ge=1, le=500)
     qa_dataset: str = Field(
         ...,
@@ -92,6 +96,7 @@ class ResearchPair(BaseModel):
             "reranking_logic_id": self.reranking_logic_id,
             "tokenizer_logic_id": self.tokenizer_logic_id,
             "prompt_logic_id": self.prompt_logic_id,
+            "ingest_pipeline_id": self.ingest_pipeline_id,
             "top_k": self.top_k,
             "qa_dataset": self.qa_dataset,
             "document_set_id": self.document_set_id,

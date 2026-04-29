@@ -42,8 +42,9 @@ def test_tokenizer_logic_01_noop() -> None:
 
 
 def test_chunking_logic_01_fixed_size() -> None:
-    parts = ch.split_for_rag(text="abcdefghij", chunk_size=4, chunk_overlap=0)
-    assert parts == ["abcd", "efgh", "ij"]
+    items = ch.split_for_rag_with_metadata(text="abcdefghij", chunk_size=4, chunk_overlap=0)
+    assert [c["text"] for c in items] == ["abcd", "efgh", "ij"]
+    assert all(c["metadata"] == {} for c in items)
 
 
 def test_reranking_logic_01_identity() -> None:

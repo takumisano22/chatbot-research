@@ -11,6 +11,13 @@ from app.rag.ingest_pipeline.registry import convert_upload_bytes_to_text
 from app.rag.ingest_pipeline.runner import ingest_plain_text
 from app.rag.vectorstore.vector_db import RagWriteSession, rag_write_session
 
+# IngestPipelineModule は experiment 層のクラスだが、batch_runner からの差し込み専用に
+# 受け口だけを開けておく。app.rag からは load しない（依存方向は experiment → rag のまま）。
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from app.experiment.ingest_pipeline_registry import IngestPipelineModule
+
 logger = logging.getLogger(__name__)
 
 # -----------------------------------------------------------------------------
@@ -25,6 +32,7 @@ def run_upload_items_batch(
     items: list[tuple[str, bytes]],
     *,
     research_pair_id: str | None = None,
+    pipeline: "IngestPipelineModule | None" = None,
 ) -> list[dict[str, Any]]:
     session = rag_write_session(settings)
     out: list[dict[str, Any]] = []
@@ -32,7 +40,7 @@ def run_upload_items_batch(
     if research_pair_id is not None and total == 0:
         _emit_ingest_progress(0, 0, research_pair_id)
     for i, (name, data) in enumerate(items):
-        sn, ok, err, n = _ingest_single_upload(settings, session, name, data)
+        sn, ok, err, n = _ingest_single_upload(settings, session, name, data, pipeline)
         out.append({"source_name": sn, "ok": ok, "error": err, "chunks_written": n})
         if research_pair_id is not None:
             _emit_ingest_progress(i + 1, total, research_pair_id)
@@ -72,12 +80,34 @@ def _ingest_single_upload(
     session: RagWriteSession,
     name: str,
     data: bytes,
+    pipeline: "IngestPipelineModule | None",
 ) -> tuple[str, bool, str | None, int]:
     safe_name = Path(name).name
     pol = _policy_for_file(safe_name)
     if pol is None:
         return name, False, "未対応の拡張子です（.pdf / .txt / .md のみ）", 0
+    if pipeline is not None:
+        return _ingest_one_via_pipeline(settings, session, name, data, pipeline)
     return _ingest_one_with_policy(settings, session, name, data, pol)
+
+
+def _ingest_one_via_pipeline(
+    settings: Settings,
+    session: RagWriteSession,
+    name: str,
+    data: bytes,
+    pipeline: "IngestPipelineModule",
+) -> tuple[str, bool, str | None, int]:
+    safe_name = Path(name).name
+    source = f"uploaded/{safe_name}"
+    try:
+        n = pipeline.ingest(settings, session, filename=safe_name, data=data, source=source)
+    except Exception as e:
+        logger.exception("取り込み失敗（pipeline=%s）: %s", pipeline.name, safe_name)
+        return safe_name, False, str(e), 0
+    if not isinstance(n, int):
+        return safe_name, False, f"pipeline.ingest が int を返しませんでした: {type(n).__name__}", 0
+    return safe_name, True, None, n
 
 
 def _ingest_one_with_policy(

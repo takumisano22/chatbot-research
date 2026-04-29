@@ -22,6 +22,8 @@ dependencies = [
     # 実験バッチの RAGAS 評価（Faithfulness 等）。未使用ルートでは import のみガード可。
     "ragas>=0.4.3,<0.5",
     "pyyaml>=6.0.0",
+    # ingest_pipeline/library/docling_library.py で使用。変換～チャンク化までを内部で完結させる。
+    "docling>=2.0.0",
 ]
 
 [project.optional-dependencies]

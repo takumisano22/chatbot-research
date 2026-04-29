@@ -21,30 +21,28 @@ from typing import Any
 # ============================================================
 # 主要処理フロー（呼び出し関係）
 # ============================================================
-# 1) split_for_rag_structure_aware()
-#    -> normalize_text()
-#       -> _split_embedded_headings()
-#       -> _ensure_blank_before_headings()
-#    -> extract_heading_candidates()
-#       -> _extract_marker_value()
-#       -> _award_sequence_bonus()
-#    -> analyze_heading_groups()
-#       -> _compute_sequence_score()
-#       -> _compute_containment_and_reset()
-#    -> infer_heading_levels()
-#    -> build_section_tree()
-#       -> _candidate_confidence()
-#       -> _add_paragraph_fallback()  # 見出し無し時のみ
-#    -> flatten_chunks()              # 子ノード境界分割 & 均等チャンク化 (structure_aware_v2)
-#       -> _split_text_evenly()       # 超過テキストの均等分割
-#       -> _group_items_balanced()    # 子ノードの均等グループ化
+# split_for_rag_with_metadata()  ← 公開 API（logic_registry から動的解決）
+#   -> split_for_rag_structure_aware()
+#        -> normalize_text()
+#             -> _split_embedded_headings()
+#             -> _ensure_blank_before_headings()
+#        -> extract_heading_candidates()
+#             -> _extract_marker_value()
+#             -> _award_sequence_bonus()
+#        -> analyze_heading_groups()
+#             -> _compute_sequence_score()
+#             -> _compute_containment_and_reset()
+#        -> infer_heading_levels()
+#        -> build_section_tree()
+#             -> _candidate_confidence()
+#             -> _add_paragraph_fallback()  ← 見出し無し時のみ
+#        -> flatten_chunks()
+#             -> _split_text_evenly()
+#             -> _group_items_balanced()
 #
-# 2) split_for_rag_texts_only() / split_for_rag(chunk_size=800)
-#    -> split_for_rag_structure_aware() をラップ
-#
-# 3) main() (CLI)
-#    -> split_for_rag_structure_aware() と同等の各ステップを順に実行
-#    -> _print_tree() を必要時に実行
+# main() (CLI)
+#   -> split_for_rag_structure_aware() と同等の各ステップを順に実行
+#   -> _print_tree() を必要時に実行
 
 
 # ============================================================
@@ -1180,25 +1178,6 @@ def split_for_rag_structure_aware(
     candidates = infer_heading_levels(candidates, group_stats, config)
     root = build_section_tree(normalized, candidates, config)
     return flatten_chunks(root, config)
-
-
-def split_for_rag_texts_only(text: str) -> list[str]:
-    """text 本文のみを返す薄いラッパー。
-
-    呼び出し元:
-      - split_for_rag()
-    呼び出し先:
-      - split_for_rag_structure_aware()
-    """
-    return [c["text"] for c in split_for_rag_structure_aware(text) if c["text"]]
-
-
-def split_for_rag(
-    *, text: str, chunk_size: int = 800, chunk_overlap: int = 0
-) -> list[str]:
-    """既存 split_for_rag との互換インタフェース。chunk_size を max_chunk_chars として使用。"""
-    config = ChunkingConfig(max_chunk_chars=chunk_size)
-    return [c["text"] for c in split_for_rag_structure_aware(text, config) if c["text"]]
 
 
 def split_for_rag_with_metadata(

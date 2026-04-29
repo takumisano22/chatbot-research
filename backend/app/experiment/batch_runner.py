@@ -16,13 +16,17 @@ from langchain_core.language_models.chat_models import BaseChatModel
 
 from app.core.config import Settings, get_settings
 from app.experiment.csv_format import distance_cell, experiment_csv_fieldnames, snippet_cell
+from app.experiment.ingest_pipeline_registry import (
+    IngestPipelineModule,
+    is_superseded,
+    load_ingest_pipeline,
+)
 from app.experiment.logic_registry import (
     call_rerank,
     call_retrieve,
     load_rag_system_message,
     load_rerank_fn,
     load_retrieve_fn,
-    load_split_for_rag,
     load_split_for_rag_with_metadata,
     load_tokenize_query,
 )
@@ -30,7 +34,6 @@ from app.experiment.ragas_eval import run_ragas_row_metrics
 from app.experiment.research_pair_schema import ResearchPair
 from app.rag.ingest_batch import run_upload_items_batch
 from app.rag.logic.experiment_context import (
-    active_chunking_split,
     active_chunking_split_with_metadata,
     active_tokenizer,
 )
@@ -62,8 +65,12 @@ def preflight_logic(
     search_logic_id: str,
     reranking_logic_id: str,
     prompt_logic_id: str,
+    pipeline: IngestPipelineModule | None = None,
 ) -> None:
-    load_split_for_rag("chunking", chunking_logic_id)
+    # ingest_pipeline が chunking を代替するなら chunking_logic のロード検証は行わない。
+    # ※ research_pair に chunking_logic_id が書かれていても skip 可能（要件）。
+    if pipeline is None or not is_superseded(pipeline.superseded, "chunking"):
+        load_split_for_rag_with_metadata("chunking", chunking_logic_id)
     load_tokenize_query("tokenizer", tokenizer_logic_id)
     load_retrieve_fn("search", search_logic_id)
     load_rerank_fn("reranking", reranking_logic_id)
@@ -78,12 +85,14 @@ def run_research_pair_batch(
     dataset_name: str | None,
 ) -> tuple[bytes, list[dict[str, str]]]:
     # 戻り値: (CSV bytes, JSON 出力用の {"question", "answer"} アイテム配列)
+    pipeline = load_ingest_pipeline(rp.ingest_pipeline_id) if rp.ingest_pipeline_id else None
     preflight_logic(
         chunking_logic_id=rp.chunking_logic_id,
         tokenizer_logic_id=rp.tokenizer_logic_id,
         search_logic_id=rp.search_logic_id,
         reranking_logic_id=rp.reranking_logic_id,
         prompt_logic_id=rp.prompt_logic_id,
+        pipeline=pipeline,
     )
     base = get_settings()
     runtime = _runtime_from_research_pair(base, rp)
@@ -100,6 +109,7 @@ def run_research_pair_batch(
         run_ragas=rp.ragas_enabled,
         dataset_name=dataset_name,
         top_k=int(rp.top_k),
+        pipeline=pipeline,
     )
 
 # -----------------------------------------------------------------------------
@@ -121,18 +131,27 @@ def _run_batch_with_logic(
     run_ragas: bool,
     dataset_name: str | None,
     top_k: int,
+    pipeline: IngestPipelineModule | None = None,
 ) -> tuple[bytes, list[dict[str, str]]]:
-    split_fn = load_split_for_rag("chunking", chunking_logic_id)
-    # ロジックが metadata 付きスプリッタを提供していれば一緒に差し替える。
-    # 未提供なら None を入れて chunker 側のフォールバック (テキストのみ経路) に確実に戻す。
-    split_with_meta_fn = load_split_for_rag_with_metadata("chunking", chunking_logic_id)
+    # chunking は pipeline が代替する場合のみ ContextVar セットを skip。
+    # tokenizer は質問側（検索クエリ）でも使うため常にセットする。
+    chunking_overridden = pipeline is not None and is_superseded(pipeline.superseded, "chunking")
+    split_fn = (
+        None if chunking_overridden
+        else load_split_for_rag_with_metadata("chunking", chunking_logic_id)
+    )
     tok_fn = load_tokenize_query("tokenizer", tokenizer_logic_id)
     with ExitStack() as stack:
-        stack.enter_context(active_chunking_split(split_fn))
-        stack.enter_context(active_chunking_split_with_metadata(split_with_meta_fn))
+        if split_fn is not None:
+            stack.enter_context(active_chunking_split_with_metadata(split_fn))
         stack.enter_context(active_tokenizer(tok_fn))
         rag_reset_collection(runtime)
-        ingest_rows = run_upload_items_batch(runtime, upload_items, research_pair_id=rp.research_pair_id)
+        ingest_rows = run_upload_items_batch(
+            runtime,
+            upload_items,
+            research_pair_id=rp.research_pair_id,
+            pipeline=pipeline,
+        )
         _raise_if_ingest_failed(ingest_rows)
 
         try:
@@ -154,6 +173,7 @@ def _run_batch_with_logic(
             "search_logic_id": search_logic_id,
             "reranking_logic_id": reranking_logic_id,
             "prompt_logic_id": prompt_logic_id,
+            "ingest_pipeline_id": pipeline.name if pipeline else "",
             "llm_model": runtime.llm_model,
             "embedding_provider": runtime.embedding_provider,
             "embedding_model": runtime.embedding_model,

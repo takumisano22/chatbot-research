@@ -36,31 +36,13 @@ def import_logic_module(category: LogicCategory, logic_id: str) -> ModuleType:
     return importlib.import_module(name)
 
 
-def load_split_for_rag(category: LogicCategory, logic_id: str) -> Callable[..., list[str]]:
-    mod = import_logic_module(category, logic_id)
-    fn = getattr(mod, "split_for_rag", None)
-    if not callable(fn):
-        raise TypeError(f"{mod.__name__} に split_for_rag がありません")
-    return fn  # type: ignore[return-value]
-
-
 def load_split_for_rag_with_metadata(
     category: LogicCategory, logic_id: str
-) -> Callable[..., list[dict[str, Any]]] | None:
-    """metadata 付きスプリッタが提供されていれば返す。無ければ None。
-
-    任意の拡張点であり、未提供のロジック (例: chunking_logic_01) でも
-    エラーにはせず None を返す。chunker.py 側はこの場合 split_for_rag
-    経由でテキストのみ取得する。
-    """
+) -> Callable[..., list[dict[str, Any]]]:
     mod = import_logic_module(category, logic_id)
     fn = getattr(mod, "split_for_rag_with_metadata", None)
-    if fn is None:
-        return None
     if not callable(fn):
-        raise TypeError(
-            f"{mod.__name__}.split_for_rag_with_metadata が呼び出し不可です"
-        )
+        raise TypeError(f"{mod.__name__} に split_for_rag_with_metadata がありません")
     return fn  # type: ignore[return-value]
 
 
