@@ -127,7 +127,7 @@ class ChunkingConfig:
     output_markdown: bool = True
     # max_chunk_chars: この文字数を超えるセクションは子ノードへ分割委譲する。
     # 収まる場合は子孫テキストを含めて1チャンクにまとめ、重複を防ぐ。
-    max_chunk_chars: int = 1500
+    max_chunk_chars: int = 500
 
 
 @dataclass
