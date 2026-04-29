@@ -499,7 +499,16 @@ def extract_heading_candidates(
         stripped = line.lstrip()
         line_len = len(stripped)
 
-        if not stripped or line_len > config.max_heading_line_length:
+        # 強見出し（附則 / 第N章 / 第N条）は OCR で条文本文が同行に連結された長文行でも
+        # 見出しとして扱う。親チャンクの _format_chunk_md 側は _classify_heading_line で
+        # 行長に関係なく構造認識しているため、候補抽出もこれに揃え、子チャンクの分割が
+        # 親チャンクの MD 化判断と一致するようにする。スコア下限 (min_heading_score) は
+        # 引き続き効くため、誤検出は score 段階で抑止される。
+        is_strong_heading = bool(_STRONG_HEADING_LINE_RE.match(stripped))
+
+        if not stripped or (
+            line_len > config.max_heading_line_length and not is_strong_heading
+        ):
             continue
 
         # 直前が空行か（after_blank の判定材料）。
