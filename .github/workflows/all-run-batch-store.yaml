@@ -40,7 +40,9 @@ jobs:
             docker compose run --rm experiment_runner --research-pair %%~nF
             if not errorlevel 1 (
             if not exist chatbot-scoring\input\csv mkdir chatbot-scoring\input\csv
-            copy outputs\%%~nF*.csv chatbot-scoring\input\csv\
+            if not exist chatbot-scoring\input\json mkdir chatbot-scoring\input\json
+            copy outputs\csv\%%~nF*.csv chatbot-scoring\input\csv\
+            copy outputs\json\%%~nF*.json chatbot-scoring\input\json\
             echo %%~nxF>> research_pairs\executed_log\executed_pairs.txt
             ) else (
               echo Failed: %%~nxF
@@ -66,7 +68,7 @@ jobs:
           cd chatbot-scoring
           git config user.name "GitHub Actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add input/csv/
+          git add input/csv/ input/json/
           git commit -m "Add batch output" || echo "No changes to commit"
           git push
 

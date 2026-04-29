@@ -70,13 +70,14 @@ def preflight_logic(
     _ = load_rag_system_message(prompt_logic_id)
 
 
-def run_research_pair_batch_bytes(
+def run_research_pair_batch(
     rp: ResearchPair,
     upload_items: list[tuple[str, bytes]],
     questions: list[str],
     *,
     dataset_name: str | None,
-) -> bytes:
+) -> tuple[bytes, list[dict[str, str]]]:
+    # 戻り値: (CSV bytes, JSON 出力用の {"question", "answer"} アイテム配列)
     preflight_logic(
         chunking_logic_id=rp.chunking_logic_id,
         tokenizer_logic_id=rp.tokenizer_logic_id,
@@ -120,7 +121,7 @@ def _run_batch_with_logic(
     run_ragas: bool,
     dataset_name: str | None,
     top_k: int,
-) -> bytes:
+) -> tuple[bytes, list[dict[str, str]]]:
     split_fn = load_split_for_rag("chunking", chunking_logic_id)
     # ロジックが metadata 付きスプリッタを提供していれば一緒に差し替える。
     # 未提供なら None を入れて chunker 側のフォールバック (テキストのみ経路) に確実に戻す。
@@ -158,6 +159,7 @@ def _run_batch_with_logic(
             "embedding_model": runtime.embedding_model,
         }
         n_questions = len(questions)
+        qa_items: list[dict[str, str]] = []
         if n_questions == 0:
             _emit_qa_progress(0, 0, rp.research_pair_id)
         for i, question in enumerate(questions):
@@ -177,8 +179,14 @@ def _run_batch_with_logic(
                 top_k=top_k,
             )
             writer.writerow(row)
+            qa_items.append(
+                {
+                    "question": str(row.get("input", "")),
+                    "answer": str(row.get("output", "")),
+                }
+            )
             _emit_qa_progress(i + 1, n_questions, rp.research_pair_id)
-        return buf.getvalue().encode("utf-8-sig")
+        return buf.getvalue().encode("utf-8-sig"), qa_items
 
 # -----------------------------------------------------------------------------
 # 1 問の実行

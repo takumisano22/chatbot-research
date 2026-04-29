@@ -37,11 +37,14 @@ jobs:
           token: ${{ secrets.SCORING_WRITE_TOKEN }}
           path: chatbot-scoring
 
-      - name: Copy csv to scoring
+      - name: Copy csv and json to scoring
         shell: cmd
         run: |
-          copy outputs\${{ inputs.pair_file }}*.csv chatbot-scoring\input\csv\
-      
+          if not exist chatbot-scoring\input\csv mkdir chatbot-scoring\input\csv
+          if not exist chatbot-scoring\input\json mkdir chatbot-scoring\input\json
+          copy outputs\csv\${{ inputs.pair_file }}*.csv chatbot-scoring\input\csv\
+          copy outputs\json\${{ inputs.pair_file }}*.json chatbot-scoring\input\json\
+
       - name: commit and push to scoring
         shell: cmd
         run: |
@@ -49,7 +52,7 @@ jobs:
           cd chatbot-scoring
           git config user.name "GitHub Actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add input/csv/
+          git add input/csv/ input/json/
           git commit -m "Add batch output for ${{ inputs.pair_file }}" || echo "No changes to commit"
           git push
 
