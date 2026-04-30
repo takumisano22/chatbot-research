@@ -1,6 +1,6 @@
 # サンプル research_pair。実行前に qa_datasets / ingest_document を実データで埋めてください。
-research_pair_id: RP-E-0001
-llm_model: dsasai/llama3-elyza-jp-8b
+research_pair_id: RP-RC-0004
+llm_model: llama3.2
 embedding_provider: ruri_http
 embedding_base_url: http://host.docker.internal:8010
 embedding_model: cl-nagoya/ruri-v3-310m
