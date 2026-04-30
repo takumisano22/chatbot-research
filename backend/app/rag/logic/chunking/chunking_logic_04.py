@@ -132,7 +132,7 @@ class ChunkingConfig:
     output_markdown: bool = True
     # max_chunk_chars: この文字数を超えるセクションは子ノードへ分割委譲する。
     # 収まる場合は子孫テキストを含めて1チャンクにまとめ、重複を防ぐ。
-    max_chunk_chars: int = 500
+    max_chunk_chars: int = 1500
 
 
 @dataclass
@@ -1306,17 +1306,19 @@ def default_metadata_builder(
       flatten_chunks() の metadata_builder 引数に渡す。
     """
     # heading_type=="paragraph" は見出し抽出失敗時のフォールバック扱い。
-    # level>=3 のノードは通常独立チャンク化しないが safety net として child へ寄せる。
+    # level==1 → parent / level==2 → child / level>=3 → grandchild に分類する。
+    # 階層 chunk_id (parent_chunk_id 等) は flatten_chunks 側で metadata に追記する。
     if node.heading_type == "paragraph":
         chunk_role = "fallback"
     elif node.level == 1:
         chunk_role = "parent"
-    else:
+    elif node.level == 2:
         chunk_role = "child"
+    else:
+        chunk_role = "grandchild"
 
     return {
         "chunk_id": chunk_id,
-        "parent_id": section_parent_id,
         "root_id": doc_root_id,
         "level": node.level,
         "path_text": " > ".join(path),
@@ -1449,6 +1451,39 @@ def _format_subtree(
             out.append(line)
         return "\n".join(out).strip()
 
+    # level=3 (孫) ノード単体の装飾済みテキスト。
+    # 自身の見出しを `#### ` で出し、本文中の更に内側 hint の列挙行を `- ` で装飾する。
+    # 子チャンクの装飾と並んで、孫チャンクとして独立保存する用途で cache へ格納する。
+    def _format_grandchild_subtree(n: SectionNode) -> str:
+        text_lines = n.text.split("\n")
+        self_hint = _hint_for_type(n.heading_type)
+        node_heading = n.heading.strip()
+
+        head = _heading_md(n)
+        out: list[str] = []
+        head_appended = False
+        for line in text_lines:
+            stripped = line.strip()
+            if not stripped:
+                out.append("")
+                continue
+            if not head_appended and stripped == node_heading:
+                if head:
+                    out.append(head)
+                head_appended = True
+                continue
+            cls = _classify_heading_line(stripped)
+            if cls is not None:
+                ltype, lvalue = cls
+                if isinstance(lvalue, int) and _hint_for_type(ltype) > self_hint:
+                    out.append(f"- {stripped}")
+                    continue
+            out.append(line)
+
+        if not head_appended and head:
+            out.insert(0, head)
+        return "\n".join(out).strip()
+
     def _format_child_subtree(n: SectionNode) -> str:
         """level=2 ノード: 本文中の孫候補を type 横断スタックで階層分けして装飾。"""
         text_lines = n.text.split("\n")
@@ -1502,6 +1537,18 @@ def _format_subtree(
 
         if n.level == 2:
             result = _format_child_subtree(n)
+            cache[n.id] = result
+            # 孫(level=3)ノードを独立チャンクとして取り出すために、
+            # ノード単体の装飾済みテキストも cache に格納する。
+            # 子チャンクの装飾と二重で持つ形だが、_emit_grandchild で参照する。
+            for c in sorted(n.children, key=lambda c: c.start_char):
+                if c.level == 3:
+                    cache[c.id] = _format_grandchild_subtree(c)
+            return result
+
+        if n.level == 3:
+            # 子(level=2)を経由せず直接ツリー上に level=3 が来たケースの保険。
+            result = _format_grandchild_subtree(n)
             cache[n.id] = result
             return result
 
@@ -1583,8 +1630,8 @@ def _demote_standalone_h4_prefixes_to_bullets(text: str) -> str:
 # セクションツリーを RAG 投入用チャンク配列へ平坦化する。
 #
 # 事前に _format_subtree() でツリー全体をマークダウン化し、各ノードの装飾済みテキスト
-# (自身 + 全子孫) を辞書に保持している。本関数はその辞書を基に分割保存するだけなので、
-# 親と子で同じ装飾結果を共有でき、孫境界での分割も装飾済みテキスト行を境界に行える。
+# を辞書に保持している。本関数はその辞書を基に分割保存するだけなので、親と子と孫で
+# 同じ装飾結果を共有でき、孫境界での分割も装飾済みテキスト行を境界に行える。
 #
 # 分割戦略 (structure_aware_v4):
 #   - level==1 (章相当)  → 親チャンク。max_chunk_chars 超過時は装飾済みテキストを
@@ -1592,10 +1639,20 @@ def _demote_standalone_h4_prefixes_to_bullets(text: str) -> str:
 #   - level==2 (条相当)  → 子チャンク。本文（見出し除く）が空行を除き 2 行以上で採用。
 #                         親章内に基準を満たす同 heading_type が 1 つでもあれば本文 1 行も
 #                         昇格採用する（見出しのみ＝本文 0 行は除外）。
+#                         先頭に親(章)の見出し 1 行を prefix として追記する。
 #                         単独で max_chunk_chars 超過時は "#### " 行 (孫=列挙境界) で
 #                         _split_at_block_boundary 分割。
-#   - level>=3           → 独立チャンク化せず親/子チャンク本文に含まれる装飾済み行で出力。
-#   - 0 件時             → root を 1 チャンク補償する。
+#   - level==3 (列挙相当)→ 孫チャンク。本文 1 行以上で採用。先頭に親(章)+子(条)の
+#                         見出し 1 行を prefix として追記する。max_chunk_chars 超過時は
+#                         _split_text_evenly で文字数ベース均等分割。
+#   - level>=4           → 独立チャンク化せず親/子/孫チャンク本文に含まれる装飾済み行で出力。
+#
+# 重複削減（_walk 内の merge_* フラグ）:
+#   親内に有効な子が 1 つだけなら子チャンクは emit せず親が兼ねる。子内に有効な孫が
+#   1 つだけなら孫チャンクは emit せず子（または兼ねる親）が兼ねる。兼ねた階層の
+#   chunk_id は metadata で上層 chunk_id 自身として表現する（child_chunk_id == parent_chunk_id 等）。
+#
+# 0 件時は root を 1 チャンク補償する。
 def flatten_chunks(
     root: SectionNode,
     config: ChunkingConfig,
@@ -1612,6 +1669,7 @@ def flatten_chunks(
     chunks: list[dict] = []
 
     # チャンク 1 件分の metadata を組み立てる。
+    # 階層 chunk_id (parent_chunk_id 等) は emit 側で確定して渡す。
     def _build_meta(
         chunk_id: str,
         node: SectionNode,
@@ -1621,8 +1679,11 @@ def flatten_chunks(
         *,
         split_index: int = 0,
         split_total: int = 1,
+        parent_chunk_id: str | None = None,
+        child_chunk_id: str | None = None,
+        grandchild_chunk_id: str | None = None,
     ) -> dict[str, Any]:
-        return metadata_builder(
+        meta = metadata_builder(
             chunk_id=chunk_id,
             node=node,
             path=path,
@@ -1632,6 +1693,15 @@ def flatten_chunks(
             split_index=split_index,
             split_total=split_total,
         )
+        # 階層 ID は emit 判定の結果に従って付与する。
+        # 兼ねるケース（merge_*=True）では上層側 chunk_id をそのまま下層キーへ複製する。
+        if parent_chunk_id is not None:
+            meta["parent_chunk_id"] = parent_chunk_id
+        if child_chunk_id is not None:
+            meta["child_chunk_id"] = child_chunk_id
+        if grandchild_chunk_id is not None:
+            meta["grandchild_chunk_id"] = grandchild_chunk_id
+        return meta
 
     # default_builder の metadata には載らないが、差し替え builder が利用する可能性に備えて
     # 渡し続ける ancestor 情報。
@@ -1651,6 +1721,41 @@ def flatten_chunks(
         section_parent_id = f"chunk_{node.parent_id}" if node.parent_id else None
         return path, ancestor_chain, base_id, section_parent_id
 
+    # ノード見出しを 1 行のマークダウン記法に変換する。
+    # LINE_LONG_MIN を超える長さの場合は行頭ヘッダーパターン (_HEADING_LINE_PREFIX_RE) の
+    # マッチ範囲のみを取り、後続の本文混入を防ぐ。
+    def _ancestor_heading_line(a: SectionNode) -> str:
+        h = a.heading.strip()
+        if not h:
+            return ""
+        if a.id in document_title_ids:
+            md_prefix = "# "
+        elif a.heading_type == "appendix" or a.level == 1:
+            md_prefix = "## "
+        elif a.level == 2:
+            md_prefix = "### "
+        elif a.level == 3:
+            md_prefix = "#### "
+        else:
+            md_prefix = "- "
+        if len(h) > LINE_LONG_MIN:
+            m = _HEADING_LINE_PREFIX_RE.match(h)
+            if m and m.end() > 0:
+                h = h[:m.end()]
+        return f"{md_prefix}{h}"
+
+    # 祖先（document_root を除く）の見出しを各層 1 行ずつ並べた prefix を返す。
+    # 子チャンクには親(章)1 行、孫チャンクには親(章)+子(条) 2 行が並ぶ想定。
+    def _build_ancestor_prefix(ancestors: list[SectionNode]) -> str:
+        lines: list[str] = []
+        for a in ancestors:
+            if a.heading_type == "document_root":
+                continue
+            line = _ancestor_heading_line(a)
+            if line:
+                lines.append(line)
+        return "\n".join(lines)
+
     # チャンク本文の配列 parts をまとめて出力する。
     # parts は既に装飾済みテキスト (_format_subtree の出力 / _split_at_block_boundary の出力)。
     # parts が 1 件なら id をそのまま、2 件以上なら "_p{i}" を付ける。
@@ -1662,6 +1767,9 @@ def flatten_chunks(
         path: list[str],
         section_parent_id: str | None,
         ancestor_chain: list[dict[str, Any]],
+        parent_chunk_id: str | None = None,
+        child_chunk_id: str | None = None,
+        grandchild_chunk_id: str | None = None,
     ) -> None:
         n = len(parts)
         for pi, part in enumerate(parts):
@@ -1672,18 +1780,61 @@ def flatten_chunks(
                 "metadata": _build_meta(
                     cid, node, path, section_parent_id, ancestor_chain,
                     split_index=pi, split_total=n,
+                    parent_chunk_id=parent_chunk_id,
+                    child_chunk_id=child_chunk_id,
+                    grandchild_chunk_id=grandchild_chunk_id,
                 ),
             })
 
+    # 子(level=2)が独立チャンクとして採用される条件。_emit_child のロジックと一致させ、
+    # _walk の重複削減判定で同じ条件を再評価する。
+    def _is_emittable_child(c: SectionNode, parent: SectionNode) -> bool:
+        formatted = formatted_by_id.get(c.id, "").strip()
+        if not formatted or len(formatted) < config.min_child_text_length:
+            return False
+        body_lines = _meaningful_body_lines(_collapse_enumeration_blanks(formatted))
+        if body_lines >= 2:
+            return True
+        if body_lines == 0:
+            return False
+        # 兄弟に複数行本文を持つ同 heading_type があれば 1 行本文も採用。
+        return any(
+            _meaningful_body_lines(formatted_by_id.get(s.id, "")) >= 2
+            for s in parent.children
+            if s.heading_type == c.heading_type
+        )
+
+    # 孫(level=3)が独立チャンクとして採用される条件。
+    # 「すべての子チャンクに #### があるとは限らない」要件のため、tree 上で孫ノードが
+    # 存在する限り採用する（本文 0 行＝見出しのみのケースも実装イメージで認める）。
+    def _is_emittable_grandchild(g: SectionNode) -> bool:
+        formatted = formatted_by_id.get(g.id, "").strip()
+        return bool(formatted) and len(formatted) >= config.min_child_text_length
+
     # level==1（章）→ 親チャンク
-    def _emit_parent(node: SectionNode, ancestors: list[SectionNode]) -> None:
+    # merge_child=True なら子チャンクが省略され、親が子の metadata を兼ねる。
+    # merge_grandchild=True なら孫まで兼ねる（=配下が単独 / 不在）。
+    def _emit_parent(
+        node: SectionNode,
+        ancestors: list[SectionNode],
+        *,
+        merge_child: bool = False,
+        merge_grandchild: bool = False,
+    ) -> None:
         formatted = formatted_by_id.get(node.id, "").strip()
         if not formatted or len(formatted) < config.min_child_text_length:
             return
         path, ancestor_chain, base_id, section_parent_id = _common_meta(node, ancestors)
+        # 親 chunk_id をベースに、兼ねる階層の ID を同値として展開する。
+        parent_chunk_id = base_id
+        child_chunk_id = base_id if merge_child else None
+        grandchild_chunk_id = base_id if merge_grandchild else None
         kw = dict(
             node=node, base_id=base_id,
             path=path, section_parent_id=section_parent_id, ancestor_chain=ancestor_chain,
+            parent_chunk_id=parent_chunk_id,
+            child_chunk_id=child_chunk_id,
+            grandchild_chunk_id=grandchild_chunk_id,
         )
 
         # 収まるならそのまま 1 チャンク。
@@ -1697,7 +1848,13 @@ def flatten_chunks(
         _emit_parts(parts, **kw)
 
     # level==2（条）→ 子チャンク
-    def _emit_child(node: SectionNode, ancestors: list[SectionNode]) -> None:
+    # merge_grandchild=True なら孫チャンクが省略され、子が孫の metadata を兼ねる。
+    def _emit_child(
+        node: SectionNode,
+        ancestors: list[SectionNode],
+        *,
+        merge_grandchild: bool = False,
+    ) -> None:
         formatted = formatted_by_id.get(node.id, "").strip()
         if not formatted or len(formatted) < config.min_child_text_length:
             return
@@ -1720,35 +1877,152 @@ def flatten_chunks(
             if not promoted or body_lines == 0:
                 return
 
+        # 親(章)の見出しを 1 行 prefix として追記する。
+        ancestor_prefix = _build_ancestor_prefix(ancestors)
+        formatted_with_prefix = (
+            f"{ancestor_prefix}\n{formatted}" if ancestor_prefix else formatted
+        )
+
         path, ancestor_chain, base_id, section_parent_id = _common_meta(node, ancestors)
+        parent_anc = next((a for a in ancestors if a.level == 1), None)
+        parent_chunk_id = f"chunk_{parent_anc.id}" if parent_anc else base_id
+        child_chunk_id = base_id
+        grandchild_chunk_id = base_id if merge_grandchild else None
         kw = dict(
             node=node, base_id=base_id,
             path=path, section_parent_id=section_parent_id, ancestor_chain=ancestor_chain,
+            parent_chunk_id=parent_chunk_id,
+            child_chunk_id=child_chunk_id,
+            grandchild_chunk_id=grandchild_chunk_id,
         )
 
-        if len(formatted) <= config.max_chunk_chars:
-            _emit_parts([formatted], **kw)
+        if len(formatted_with_prefix) <= config.max_chunk_chars:
+            _emit_parts([formatted_with_prefix], **kw)
             return
 
         # 条単独で超過 → 孫(列挙)= "#### " 行を境界に均等分割。
-        # 装飾済みテキスト上の境界で分けるので「再延長することがで|きま」のような
-        # 文章途中の切断が発生しない。
-        parts = _split_at_block_boundary(formatted, "#### ", config.max_chunk_chars)
+        # ancestor_prefix 行は "#### " で始まらないため、_split_at_block_boundary 内では
+        # prefix_lines として保たれ各 part の先頭に複製される。
+        parts = _split_at_block_boundary(
+            formatted_with_prefix, "#### ", config.max_chunk_chars
+        )
+        _emit_parts(parts, **kw)
+
+    # level==3（列挙）→ 孫チャンク
+    def _emit_grandchild(node: SectionNode, ancestors: list[SectionNode]) -> None:
+        formatted = formatted_by_id.get(node.id, "").strip()
+        if not formatted or len(formatted) < config.min_child_text_length:
+            return
+
+        formatted = _collapse_enumeration_blanks(formatted)
+
+        # 親(章) と 子(条) の見出しを各 1 行ずつ prefix として追記する。
+        ancestor_prefix = _build_ancestor_prefix(ancestors)
+        formatted_with_prefix = (
+            f"{ancestor_prefix}\n{formatted}" if ancestor_prefix else formatted
+        )
+
+        path, ancestor_chain, base_id, section_parent_id = _common_meta(node, ancestors)
+        parent_anc = next((a for a in ancestors if a.level == 1), None)
+        child_anc = next((a for a in ancestors if a.level == 2), None)
+        parent_chunk_id = f"chunk_{parent_anc.id}" if parent_anc else base_id
+        # 子(条)が祖先に存在しない構造（子省略・直に孫がぶら下がるケース）では
+        # 上層が下層を兼ねる方針に従い親 chunk_id を child_chunk_id にも複製する。
+        child_chunk_id = (
+            f"chunk_{child_anc.id}" if child_anc else parent_chunk_id
+        )
+        grandchild_chunk_id = base_id
+        kw = dict(
+            node=node, base_id=base_id,
+            path=path, section_parent_id=section_parent_id, ancestor_chain=ancestor_chain,
+            parent_chunk_id=parent_chunk_id,
+            child_chunk_id=child_chunk_id,
+            grandchild_chunk_id=grandchild_chunk_id,
+        )
+
+        if len(formatted_with_prefix) <= config.max_chunk_chars:
+            _emit_parts([formatted_with_prefix], **kw)
+            return
+
+        # 孫単独で超過: 孫より下層に分割境界 (####) は無いため文字数ベースで均等分割。
+        # prefix を取り除いた本体を分割し、各 part の先頭に prefix を再付与する。
+        budget = max(
+            config.max_chunk_chars - (len(ancestor_prefix) + 1 if ancestor_prefix else 0),
+            1,
+        )
+        body_parts = _split_text_evenly(formatted, budget)
+        if ancestor_prefix:
+            parts = [f"{ancestor_prefix}\n{p}" for p in body_parts]
+        else:
+            parts = body_parts
         _emit_parts(parts, **kw)
 
     # ツリーを再帰的にたどり level に応じて出力する。
+    # 親→子の重複削減: 親章内に有効な子(条)が 1 つだけなら子は emit しない（merge_child）。
+    # 子→孫の重複削減: 子条内に有効な孫(列挙)が 1 つだけなら孫は emit しない（merge_grandchild）。
+    # 子省略時でも、その子の下に有効な孫が複数あれば孫チャンクは作成する。
     def _walk(node: SectionNode, ancestors: list[SectionNode]) -> None:
         if node.heading_type == "document_root":
             for child in node.children:
                 _walk(child, ancestors)
             return
+
         if node.level == 1:
-            _emit_parent(node, ancestors)
-        elif node.level == 2:
-            _emit_child(node, ancestors)
-        # level>=3 は独立チャンク化しない（親/子チャンク本文に含まれる）。
-        for child in node.children:
-            _walk(child, ancestors + [node])
+            emittable_children = [
+                c for c in node.children if _is_emittable_child(c, node)
+            ]
+            merge_child = len(emittable_children) <= 1
+            merge_grandchild = False
+            if merge_child:
+                # 子省略時、唯一の子の下に有効な孫が複数あれば孫は出すので
+                # 親が孫まで兼ねるのは「孫も 1 つ以下」の場合に限る。
+                if len(emittable_children) == 1:
+                    only_child = emittable_children[0]
+                    emittable_grands = [
+                        g for g in only_child.children if _is_emittable_grandchild(g)
+                    ]
+                    merge_grandchild = len(emittable_grands) <= 1
+                else:
+                    # 子が 0 件 → 孫もチャンク化しない扱い。
+                    merge_grandchild = True
+
+            _emit_parent(
+                node, ancestors,
+                merge_child=merge_child,
+                merge_grandchild=merge_grandchild,
+            )
+
+            if not merge_child:
+                for child in node.children:
+                    _walk(child, ancestors + [node])
+            else:
+                # 子は省略するが、孫の探索は継続する。孫が複数あれば孫チャンクを emit。
+                for child in node.children:
+                    emittable_grands = [
+                        g for g in child.children if _is_emittable_grandchild(g)
+                    ]
+                    if len(emittable_grands) >= 2:
+                        for g in child.children:
+                            _walk(g, ancestors + [node, child])
+            return
+
+        if node.level == 2:
+            emittable_grands = [
+                g for g in node.children if _is_emittable_grandchild(g)
+            ]
+            merge_grandchild = len(emittable_grands) <= 1
+
+            _emit_child(node, ancestors, merge_grandchild=merge_grandchild)
+
+            if not merge_grandchild:
+                for g in node.children:
+                    _walk(g, ancestors + [node])
+            return
+
+        if node.level == 3:
+            _emit_grandchild(node, ancestors)
+            # level>=4 は独立チャンク化しない（孫チャンク本文に含まれる）。
+            return
 
     _walk(root, [])
 
@@ -1779,7 +2053,7 @@ def split_for_rag_with_metadata(
     if not text or not text.strip():
         return []
 
-    config = ChunkingConfig(max_chunk_chars=chunk_size)
+    config = ChunkingConfig()
     normalized = normalize_text(text, config)
     candidates = extract_heading_candidates(normalized, config)
     group_stats = analyze_heading_groups(candidates, normalized, config)
