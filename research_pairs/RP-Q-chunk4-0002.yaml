@@ -1,0 +1,18 @@
+# サンプル research_pair。実行前に qa_datasets / ingest_document を実データで埋めてください。
+research_pair_id: RP-Q-chunk4-0002
+llm_model: qwen2.5:7b
+embedding_provider: ruri_http
+embedding_base_url: http://host.docker.internal:8010
+embedding_model: cl-nagoya/ruri-v3-310m
+
+search_logic_id: logic_01
+chunking_logic_id: logic_04
+reranking_logic_id: logic_01
+tokenizer_logic_id: logic_01
+prompt_logic_id: logic_07
+
+top_k: 6
+qa_dataset: standard_qa.json
+document_set_id: DOCSET-0001
+ragas_enabled: false
+langfuse_enabled: false 
