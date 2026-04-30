@@ -1211,6 +1211,32 @@ def _split_text_evenly(text: str, max_chars: int) -> list[str]:
     return [p for p in parts if p.strip()] or [text]
 
 
+# 装飾済みの子チャンクテキストから "#### " で始まる孫ブロックを切り出す。
+# 孫の検出は extract_heading_candidates のスコアフィルタ（長さペナルティ等）に
+# 影響を受けないよう、ツリー上の level=3 ノードではなく _format_child_subtree が
+# 出力した "#### " マークダウンを正として扱う。これにより長文の列挙行でも漏れなく
+# 孫チャンクとして拾える。
+# 戻り値: ["#### {heading}\n本文\n...", ...] の形式の文字列配列。
+# 先頭 "#### " 行より前に現れる子チャンクの見出し / 本文行は捨てる（孫ブロックでは
+# 親 / 子の prefix を別途 _build_ancestor_prefix で再構築するため不要）。
+def _extract_grandchild_blocks(child_formatted: str) -> list[str]:
+    if not child_formatted or "#### " not in child_formatted:
+        return []
+    lines = child_formatted.split("\n")
+    blocks: list[list[str]] = []
+    current: list[str] | None = None
+    for line in lines:
+        if line.startswith("#### "):
+            if current is not None:
+                blocks.append(current)
+            current = [line]
+        elif current is not None:
+            current.append(line)
+    if current is not None:
+        blocks.append(current)
+    return ["\n".join(b).strip() for b in blocks]
+
+
 # 装飾済みテキストを「block_prefix で始まる行」を境界としてブロック分けし、
 # _group_items_balanced で max_chars 以下のチャンクに均等分割する。
 # block_prefix の前にある行は prefix として全チャンクの先頭に付与する。
@@ -1804,12 +1830,17 @@ def flatten_chunks(
             if s.heading_type == c.heading_type
         )
 
-    # 孫(level=3)が独立チャンクとして採用される条件。
-    # 「すべての子チャンクに #### があるとは限らない」要件のため、tree 上で孫ノードが
-    # 存在する限り採用する（本文 0 行＝見出しのみのケースも実装イメージで認める）。
-    def _is_emittable_grandchild(g: SectionNode) -> bool:
-        formatted = formatted_by_id.get(g.id, "").strip()
-        return bool(formatted) and len(formatted) >= config.min_child_text_length
+    # 子チャンクの装飾済みテキストから孫ブロック ("#### " 始まり) を抽出する。
+    # 孫の認識はツリー上の level=3 ノード有無ではなく、_format_child_subtree が
+    # 出した "#### " マークダウンを正とする（長文の列挙行も漏れなく拾うため）。
+    # min_child_text_length 未満の極小ブロックは除外する。
+    def _grandchild_blocks(child_node: SectionNode) -> list[str]:
+        formatted = formatted_by_id.get(child_node.id, "").strip()
+        if not formatted:
+            return []
+        formatted = _collapse_enumeration_blanks(formatted)
+        blocks = _extract_grandchild_blocks(formatted)
+        return [b for b in blocks if len(b) >= config.min_child_text_length]
 
     # level==1（章）→ 親チャンク
     # merge_child=True なら子チャンクが省略され、親が子の metadata を兼ねる。
@@ -1909,8 +1940,18 @@ def flatten_chunks(
         _emit_parts(parts, **kw)
 
     # level==3（列挙）→ 孫チャンク
-    def _emit_grandchild(node: SectionNode, ancestors: list[SectionNode]) -> None:
-        formatted = formatted_by_id.get(node.id, "").strip()
+    # formatted_override が指定された場合は formatted_by_id を引かずそのテキストを使う。
+    # _emit_grandchildren_from_blocks から合成 SectionNode で呼ばれる経路で使用する。
+    def _emit_grandchild(
+        node: SectionNode,
+        ancestors: list[SectionNode],
+        *,
+        formatted_override: str | None = None,
+    ) -> None:
+        if formatted_override is not None:
+            formatted = formatted_override.strip()
+        else:
+            formatted = formatted_by_id.get(node.id, "").strip()
         if not formatted or len(formatted) < config.min_child_text_length:
             return
 
@@ -1957,10 +1998,45 @@ def flatten_chunks(
             parts = body_parts
         _emit_parts(parts, **kw)
 
+    # 装飾済み子テキストから抽出した "#### " ブロックを孫チャンクとして emit する。
+    # 各ブロックに対し合成 SectionNode を作り、metadata builder と _emit_grandchild を
+    # 通常経路と同じ形で再利用する。ツリー上に level=3 ノードが存在しなくても、
+    # _format_child_subtree が出した "#### " マークダウンに従って漏れなく emit できる。
+    def _emit_grandchildren_from_blocks(
+        blocks: list[str],
+        ancestors: list[SectionNode],
+    ) -> None:
+        if not ancestors:
+            return
+        child_anc = ancestors[-1]  # 子(条) ノード
+        for i, block_text in enumerate(blocks):
+            first_line = block_text.split("\n", 1)[0]
+            heading_text = (
+                first_line[len("#### "):]
+                if first_line.startswith("#### ")
+                else first_line
+            )
+            seed = f"{child_anc.id}|{i}|{heading_text[:80]}"
+            synth_id = "sec_" + hashlib.sha256(seed.encode()).hexdigest()[:8]
+            synth_node = SectionNode(
+                id=synth_id,
+                heading=heading_text,
+                heading_type="grandchild",
+                level=3,
+                text=block_text,
+                start_char=0,
+                parent_id=child_anc.id,
+            )
+            _emit_grandchild(synth_node, ancestors, formatted_override=block_text)
+
     # ツリーを再帰的にたどり level に応じて出力する。
+    # 孫の認識は装飾済み子テキスト中の "#### " ブロックを正とするため、ツリー上の
+    # level=3 ノードが存在しない場合（例: 長文の列挙行で extract_heading_candidates の
+    # 長さペナルティに引っかかったケース）でも漏れなく孫チャンクを emit できる。
+    #
     # 親→子の重複削減: 親章内に有効な子(条)が 1 つだけなら子は emit しない（merge_child）。
-    # 子→孫の重複削減: 子条内に有効な孫(列挙)が 1 つだけなら孫は emit しない（merge_grandchild）。
-    # 子省略時でも、その子の下に有効な孫が複数あれば孫チャンクは作成する。
+    # 子→孫の重複削減: 子条内の "#### " ブロックが 1 つだけなら孫は emit しない（merge_grandchild）。
+    # 子省略時でも、その子の下に "#### " ブロックが複数あれば孫チャンクは作成する。
     def _walk(node: SectionNode, ancestors: list[SectionNode]) -> None:
         if node.heading_type == "document_root":
             for child in node.children:
@@ -1972,19 +2048,17 @@ def flatten_chunks(
                 c for c in node.children if _is_emittable_child(c, node)
             ]
             merge_child = len(emittable_children) <= 1
-            merge_grandchild = False
-            if merge_child:
-                # 子省略時、唯一の子の下に有効な孫が複数あれば孫は出すので
-                # 親が孫まで兼ねるのは「孫も 1 つ以下」の場合に限る。
-                if len(emittable_children) == 1:
-                    only_child = emittable_children[0]
-                    emittable_grands = [
-                        g for g in only_child.children if _is_emittable_grandchild(g)
-                    ]
-                    merge_grandchild = len(emittable_grands) <= 1
-                else:
-                    # 子が 0 件 → 孫もチャンク化しない扱い。
-                    merge_grandchild = True
+
+            if not merge_child:
+                # 子チャンクが複数 → 孫チャンクは各子側で個別 emit されるので親は兼ねない。
+                merge_grandchild = False
+            else:
+                # 子省略 → 各子の "#### " ブロック数を確認。どの子の下にも
+                # 複数ブロックが無ければ親は孫まで兼ねる。
+                has_multi_grand = any(
+                    len(_grandchild_blocks(c)) >= 2 for c in node.children
+                )
+                merge_grandchild = not has_multi_grand
 
             _emit_parent(
                 node, ancestors,
@@ -1996,33 +2070,26 @@ def flatten_chunks(
                 for child in node.children:
                     _walk(child, ancestors + [node])
             else:
-                # 子は省略するが、孫の探索は継続する。孫が複数あれば孫チャンクを emit。
+                # 子は省略するが、孫の探索は継続する。"#### " ブロックが複数あれば孫を emit。
                 for child in node.children:
-                    emittable_grands = [
-                        g for g in child.children if _is_emittable_grandchild(g)
-                    ]
-                    if len(emittable_grands) >= 2:
-                        for g in child.children:
-                            _walk(g, ancestors + [node, child])
+                    grand_blocks = _grandchild_blocks(child)
+                    if len(grand_blocks) >= 2:
+                        _emit_grandchildren_from_blocks(
+                            grand_blocks, ancestors + [node, child]
+                        )
             return
 
         if node.level == 2:
-            emittable_grands = [
-                g for g in node.children if _is_emittable_grandchild(g)
-            ]
-            merge_grandchild = len(emittable_grands) <= 1
+            grand_blocks = _grandchild_blocks(node)
+            merge_grandchild = len(grand_blocks) <= 1
 
             _emit_child(node, ancestors, merge_grandchild=merge_grandchild)
 
             if not merge_grandchild:
-                for g in node.children:
-                    _walk(g, ancestors + [node])
+                _emit_grandchildren_from_blocks(grand_blocks, ancestors + [node])
             return
 
-        if node.level == 3:
-            _emit_grandchild(node, ancestors)
-            # level>=4 は独立チャンク化しない（孫チャンク本文に含まれる）。
-            return
+        # level >= 3 は独立 walk しない（_emit_grandchildren_from_blocks 経由で処理）。
 
     _walk(root, [])
 
