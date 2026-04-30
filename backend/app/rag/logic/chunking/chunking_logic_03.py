@@ -232,8 +232,37 @@ _INLINE_REF_RE = re.compile(
     r")"
 )
 
-# 例外的ノード（附則・総則・前文）の判定。_format_chunk_md で "**...**" 装飾に使用。
-_EXCEPTIONAL_HEADING_RE = re.compile(r"^(?:附則|総則|前文)(?:\s|$)")
+# 行内に埋め込まれた弱見出し（default_level_hint <= 4）を行内検索するパターン。
+# 強見出し版 _STRONG_HEADING_LINE_RE と対になり _split_embedded_enumerations で使う。
+_ENUM_INLINE_PATTERN = (
+    r"(?:"
+    r"\d{1,2}[.)．](?!\d)"
+    r"|[（(]\d+[)）]"
+    r"|[（(][一二三四五六七八九十〇]+[)）]"
+    r")"
+)
+_ENUM_INLINE_RE = re.compile(_ENUM_INLINE_PATTERN)
+
+# _join_soft_linebreaks 用：日本語連続文字（句点・終端記号を含めない）。
+# 前後の単独改行で繋がった本文を結合候補とみなす際の境界判定に使用。
+_SOFT_PRE_CHARS = (
+    r"぀-ゟ゠-ヿ㐀-䶿一-鿿"
+    r"0-9０-９"
+    r"ｦ-ﾟㇰ-ㇿ"
+    r"、，"
+)
+_SOFT_POST_CHARS = (
+    r"぀-ゟ゠-ヿ㐀-䶿一-鿿"
+    r"0-9０-９"
+    r"ｦ-ﾟㇰ-ㇿ"
+)
+_SOFT_LINEBREAK_RE = re.compile(
+    rf"(?<=[{_SOFT_PRE_CHARS}])(?<!\n)\n(?!\n)(?=[{_SOFT_POST_CHARS}])"
+)
+
+# 文書タイトル候補（総則・前文）。ツリー最浅レベルにユニーク存在する場合のみ "# " 装飾。
+# 附則は文書末尾の章相当として "## " で扱うため別判定。
+_TITLE_HEADING_RE = re.compile(r"^(?:総則|前文)(?:\s|$)")
 
 # 漢数字 → 整数の変換テーブル
 _KANJI_NUM: dict[str, int] = {
@@ -332,9 +361,14 @@ def normalize_text(text: str, config: ChunkingConfig | None = None) -> str:
     lines = text.split("\n")
     if config is None or config.enable_inline_heading_repair:
         lines = _split_embedded_headings(lines)
+        # 弱見出し（numeric_dot 等）も同様に行内分割しておくと、後段の見出し抽出と
+        # _format_chunk_md の同期が取れて子チャンク内の列挙崩れが減る。
+        lines = _split_embedded_enumerations(lines)
     lines = _ensure_blank_before_headings(lines)
     normalized = "\n".join(lines)
     normalized = _split_heading_linebreaks(normalized)
+    # 文中の単独改行（OCR 起因のページ末改行など）を結合する。
+    normalized = _join_soft_linebreaks(normalized)
     # 章チャンク（_emit_parent 経路）でも列挙の空行が詰まるよう、ここで一括適用する。
     # 子チャンク経路（_emit_child）でも保険として再呼び出しするが操作は冪等。
     normalized = _collapse_enumeration_blanks(normalized)
@@ -360,6 +394,42 @@ def _split_embedded_headings(lines: list[str]) -> list[str]:
         if pre:
             result.append(pre)
         result.append(line[m.start():])
+    return result
+
+
+# 行内に埋め込まれた弱見出し（"…とき2. …とき3. …" 等）を行分割する。
+# 強見出し版 _split_embedded_headings の弱見出し版で、default_level_hint <= 4 の
+# 列挙マーカー（numeric_dot / numeric_paren / japanese_paren）が対象。
+# 行内参照（_INLINE_REF_RE で識別される並列接続詞・助詞続き）と直前文字が
+# 日本語連続文字でないケースは分割対象外とする。
+def _split_embedded_enumerations(lines: list[str]) -> list[str]:
+    boundary_re = re.compile(rf"[{_SOFT_PRE_CHARS}。．.！？!?]")
+    result: list[str] = []
+    for line in lines:
+        positions: list[int] = []
+        for m in _ENUM_INLINE_RE.finditer(line):
+            i = m.start()
+            if i == 0:
+                continue
+            if _INLINE_REF_RE.match(line, m.end()):
+                continue
+            if not boundary_re.match(line[i - 1]):
+                continue
+            positions.append(i)
+
+        if not positions:
+            result.append(line)
+            continue
+
+        prev_pos = 0
+        for pos in positions:
+            seg = line[prev_pos:pos].rstrip()
+            if seg:
+                result.append(seg)
+            prev_pos = pos
+        tail = line[prev_pos:]
+        if tail:
+            result.append(tail)
     return result
 
 
@@ -398,6 +468,21 @@ def _split_heading_linebreaks(text: str) -> str:
 
         out = pat.sub(repl, out)
     return out
+
+
+# OCR 等でページ末端に残る「文中の単独改行」を除去する。
+# 前行が文末記号 (。.．!?！？) で終わっておらず、次行がヘッダーパターンで
+# 始まらない単独改行のみ結合対象とする。空行 (二重改行) は段落区切りとして残す。
+def _join_soft_linebreaks(text: str) -> str:
+    def repl(m: re.Match[str]) -> str:
+        next_pos = m.end()
+        nl = text.find("\n", next_pos)
+        next_line = text[next_pos:] if nl == -1 else text[next_pos:nl]
+        if _HEADING_LINE_PREFIX_RE.match(next_line):
+            return m.group(0)
+        return ""
+
+    return _SOFT_LINEBREAK_RE.sub(repl, text)
 
 
 # 行頭ルールマッチを軽量に判定する分類器。スコアリングは行わない。
@@ -1202,21 +1287,74 @@ def _meaningful_body_lines(text: str, heading: str) -> int:
     return sum(1 for ln in body.split("\n") if ln.strip())
 
 
+# 子チャンク内の同 heading_type 連番値列を greedy スタックで階層分けする。
+# 戻り値: line_index → level (0=孫, 1=ひ孫, ...) の辞書。
+#
+# アルゴリズム:
+#   - 値が現在 top+1 → 同 level 継続
+#   - 値が 1 (リセット) → 新規内側 level を push (ひ孫の開始)
+#   - それ以外 → スタックを下方向に探索し外側 level へ復帰可能なら pop
+#                 復帰不可なら現 level で仮継続
+# heading_type ごとに独立トラッカーを持ち、混在による誤判定を避ける。
+#
+# 例: [1, 1, 2, 3, 2, 3, 4]
+#   → [0, 1, 1, 1, 0, 0, 0]  （外側=孫4件、内側=ひ孫3件）
+def _classify_grandchild_levels(
+    candidates: list[tuple[int, str, int]],
+) -> dict[int, int]:
+    by_type: dict[str, list[tuple[int, int]]] = defaultdict(list)
+    for line_idx, mtype, value in candidates:
+        by_type[mtype].append((line_idx, value))
+
+    levels: dict[int, int] = {}
+    for items in by_type.values():
+        items.sort(key=lambda x: x[0])
+        stack: list[int] = []
+        for line_idx, v in items:
+            if not stack:
+                stack.append(v)
+                levels[line_idx] = 0
+                continue
+            top = stack[-1]
+            if v == top + 1:
+                stack[-1] = v
+                levels[line_idx] = len(stack) - 1
+                continue
+            if v == 1:
+                stack.append(v)
+                levels[line_idx] = len(stack) - 1
+                continue
+            matched = False
+            for depth in range(len(stack) - 2, -1, -1):
+                if v == stack[depth] + 1:
+                    del stack[depth + 1:]
+                    stack[depth] = v
+                    levels[line_idx] = depth
+                    matched = True
+                    break
+            if not matched:
+                stack[-1] = v
+                levels[line_idx] = len(stack) - 1
+    return levels
+
+
 # チャンク本文にマークダウン見出し記法を付与する。
 # 適用ルール:
-#   - 親ノードの見出し行  → "### " (例外的ノードは "**...**")
-#   - 子ノードの見出し行  → "## "
-#   - 列挙構造の見出し行  → "# "
-#   - それ以外            → そのまま
-# 加えて、同 heading_type で構造ツリーから漏れた行（候補スコア閾値で落ちた長文項目等）
-# は、子/孫として採用された type 集合と一致する場合に同じ記法を補完付与する。
-# 文字列完全一致では拾えないバラバラ付与（"1．要約 / 2．長文 / 3．要約" のような混在）
-# を防ぎつつ、構造ツリー外の行頭パターンを丸ごと拾うような強制マッピングは行わない。
+#   - 文書タイトル相当ノード (総則/前文 が最浅 level かつユニーク) → "# "
+#   - 附則ノード / 親ノード (level=1, 章相当)                       → "## "
+#   - 子ノード (level=2, 条相当)                                    → "### "
+#   - 孫ノード (level=3, 列挙)                                      → "#### "
+#   - ひ孫ノード (孫の内部にネストする同 type 連番)                 → "- "
+#   - それ以外                                                      → そのまま
+# 構造ツリーから漏れた行（候補スコア閾値で落ちた長文項目等）も、子/孫として採用された
+# heading_type に一致する場合は同じ記法を補完付与する。
+# 子チャンク内では孫候補連番を greedy スタックで階層分けし、ひ孫範囲は "- " に切り替える。
 def _format_chunk_md(
     text: str,
     node: SectionNode,
     *,
     is_parent: bool,
+    is_document_title: bool = False,
     config: ChunkingConfig,
 ) -> str:
     if not config.output_markdown:
@@ -1239,14 +1377,36 @@ def _format_chunk_md(
         for gc in child.children
     }
 
-    is_exceptional = (
-        node.heading_type == "appendix"
-        or bool(_EXCEPTIONAL_HEADING_RE.match(node_heading))
-    )
+    # 附則は親と同じ level=1 で並列に並ぶメインノード扱い ("## ")。
+    is_appendix = node.heading_type == "appendix"
+
+    # 子チャンク (is_parent=False) のみ、孫候補（child_types 該当）行の連番値を
+    # 階層分けしてひ孫を識別する。同 type 内で [1, 1, 2, 3, 2, 3, 4] のような
+    # 二重連番列が現れた場合に、内側 (ひ孫) を "- " 装飾へ切り替えるための材料。
+    grandchild_inner_levels: dict[int, int] = {}
+    if not is_parent and child_types:
+        cands: list[tuple[int, str, int]] = []
+        for idx, line in enumerate(text.split("\n")):
+            stripped_l = line.strip()
+            if not stripped_l:
+                continue
+            cls = _classify_heading_line(stripped_l)
+            if cls is None:
+                continue
+            ltype, lvalue = cls
+            if ltype not in child_types or not isinstance(lvalue, int):
+                continue
+            cands.append((idx, ltype, lvalue))
+        grandchild_inner_levels = _classify_grandchild_levels(cands)
+
+    # 孫候補行を装飾する共通ロジック。子チャンクではひ孫範囲を "- " に切り替える。
+    def _decorate_grandchild_in_child(stripped: str, idx: int) -> str:
+        lv = grandchild_inner_levels.get(idx, 0)
+        return f"#### {stripped}" if lv == 0 else f"- {stripped}"
 
     result: list[str] = []
     heading_found = False
-    for line in text.split("\n"):
+    for idx, line in enumerate(text.split("\n")):
         stripped = line.strip()
         if not stripped:
             result.append("")
@@ -1255,38 +1415,72 @@ def _format_chunk_md(
         # 1) ノード自身の見出し行
         if not heading_found and stripped == node_heading:
             heading_found = True
-            if is_exceptional and is_parent:
-                result.append(f"**{stripped}**")
-            elif is_parent:
-                result.append(f"### {stripped}")
-            else:
+            if is_document_title:
+                result.append(f"# {stripped}")
+            elif is_appendix or is_parent:
                 result.append(f"## {stripped}")
+            else:
+                result.append(f"### {stripped}")
             continue
 
         # 2) 構造ツリーで採用された child / grandchild との文字列完全一致
         if stripped in child_headings:
-            result.append(f"## {stripped}" if is_parent else f"# {stripped}")
+            # is_parent=True: child=条 → "### " / is_parent=False: child=孫 → "#### " or "- "
+            if is_parent:
+                result.append(f"### {stripped}")
+            else:
+                result.append(_decorate_grandchild_in_child(stripped, idx))
             continue
         if stripped in grandchild_headings:
-            result.append(f"# {stripped}")
+            # is_parent=True: grandchild=列挙 → "#### " / is_parent=False: ひ孫 → "- "
+            result.append(f"#### {stripped}" if is_parent else f"- {stripped}")
             continue
 
         # 3) 採用された type と同じ heading_type の行は補完する。
-        # 章チャンクで child=条 が認識されていれば本文中の条文行（文字列ぶれや候補漏れ）
-        # を拾い、孫=列挙が認識されていれば長文の "2．..." も同じ記法に揃える。
         line_class = _classify_heading_line(stripped)
         if line_class is not None:
             line_type = line_class[0]
             if line_type in child_types:
-                result.append(f"## {stripped}" if is_parent else f"# {stripped}")
+                if is_parent:
+                    result.append(f"### {stripped}")
+                else:
+                    result.append(_decorate_grandchild_in_child(stripped, idx))
                 continue
             if line_type in grandchild_types:
-                result.append(f"# {stripped}")
+                result.append(f"#### {stripped}" if is_parent else f"- {stripped}")
                 continue
 
         result.append(line)
 
     return "\n".join(result)
+
+
+# 文書タイトル相当のノード id を抽出する。
+# 条件: heading が「総則」または「前文」で始まり、その node.level がツリー全体で
+# 最浅レベル、かつ最浅レベルにそのノードしか存在しない（=文書全体のラッパーとして機能）。
+# 文書によっては該当無しでも構わない。
+def _identify_document_title_ids(root: SectionNode) -> set[str]:
+    all_nodes: list[SectionNode] = []
+
+    def _collect(n: SectionNode) -> None:
+        for c in n.children:
+            all_nodes.append(c)
+            _collect(c)
+
+    _collect(root)
+    valid = [n for n in all_nodes if n.level >= 1]
+    if not valid:
+        return set()
+
+    min_level = min(n.level for n in valid)
+    nodes_at_min = [n for n in valid if n.level == min_level]
+    if len(nodes_at_min) != 1:
+        return set()
+
+    n = nodes_at_min[0]
+    if _TITLE_HEADING_RE.match(n.heading.strip()):
+        return {n.id}
+    return set()
 
 
 # セクションツリーを RAG 投入用チャンク配列へ平坦化する。
@@ -1309,6 +1503,8 @@ def flatten_chunks(
         metadata_builder = default_metadata_builder
 
     doc_root_id = "doc_" + hashlib.sha256(root.heading.encode()).hexdigest()[:8]
+    # 最浅 level にユニーク存在する 総則/前文 を文書タイトルとして識別 ("# " 装飾用)。
+    document_title_ids = _identify_document_title_ids(root)
     chunks: list[dict] = []
 
     # チャンク 1 件分の metadata を組み立てる。
@@ -1364,11 +1560,17 @@ def flatten_chunks(
         ancestor_chain: list[dict[str, Any]],
     ) -> None:
         n = len(parts)
+        is_doc_title = node.id in document_title_ids
         for pi, part in enumerate(parts):
             cid = f"{base_id}_p{pi}" if n > 1 else base_id
             chunks.append({
                 "id": cid,
-                "text": _format_chunk_md(part, node, is_parent=is_parent, config=config),
+                "text": _format_chunk_md(
+                    part, node,
+                    is_parent=is_parent,
+                    is_document_title=is_doc_title,
+                    config=config,
+                ),
                 "metadata": _build_meta(
                     cid, node, path, section_parent_id, ancestor_chain,
                     split_index=pi, split_total=n,
