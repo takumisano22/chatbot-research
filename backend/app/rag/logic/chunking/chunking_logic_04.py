@@ -37,7 +37,6 @@ MetadataBuilder = Callable[..., dict[str, Any]]
 #                       -> _interval_containment()
 #                       -> _sequence_score()
 #        -> _add_paragraph_fallback()  ← 見出しゼロ時のみ
-#   -> _identify_document_title_ids()  ← 文書タイトル候補ノード id を抽出
 #   -> _format_subtree()                ← ツリー全体を再帰的にマークダウン化
 #        -> _classify_grandchild_levels() ← 子チャンク内の孫/ひ孫を type 横断で分離
 #        -> _classify_heading_line()
@@ -264,10 +263,6 @@ _SOFT_POST_CHARS = (
 _SOFT_LINEBREAK_RE = re.compile(
     rf"(?<=[{_SOFT_PRE_CHARS}])(?<!\n)\n(?!\n)(?=[{_SOFT_POST_CHARS}])"
 )
-
-# 文書タイトル候補（総則・前文）。ツリー最浅レベルにユニーク存在する場合のみ "# " 装飾。
-# 附則は文書末尾の章相当として "## " で扱うため別判定。
-_TITLE_HEADING_RE = re.compile(r"^(?:総則|前文)(?:\s|$)")
 
 # 漢数字 → 整数の変換テーブル
 _KANJI_NUM: dict[str, int] = {
@@ -1422,12 +1417,12 @@ def _classify_grandchild_levels(
 # (自身 + 全子孫を含む) の辞書を返す。flatten_chunks はこの辞書を基に分割保存する。
 #
 # 装飾ルール:
-#   - 文書タイトル相当ノード (総則/前文 が最浅 level かつユニーク) → "# "
 #   - 附則ノード / 親ノード (level=1, 章相当)                       → "## "
 #   - 子ノード (level=2, 条相当)                                    → "### "
 #   - 孫ノード (level=3, 列挙)                                      → "#### "
 #   - ひ孫ノード (孫の配下にネストする列挙)                         → "- "
 #   - それ以外の本文行                                              → そのまま
+# 文書タイトル ("# ") は flatten_chunks 側で root.heading から prefix として付与する。
 #
 # ひ孫検出は子チャンク (level=2) の装飾時に行う。本文中に出現する内側 type の列挙行
 # (heading_type の default_level_hint が自身より大きいもの) を全て収集し、
@@ -1436,7 +1431,6 @@ def _classify_grandchild_levels(
 # 列挙が孫の配下に出現するケースを、表示装飾だけで分けるための仕組み。
 def _format_subtree(
     root: SectionNode,
-    document_title_ids: set[str],
     config: ChunkingConfig,
 ) -> dict[str, str]:
     if not config.output_markdown:
@@ -1448,8 +1442,6 @@ def _format_subtree(
         h = n.heading.strip()
         if not h:
             return ""
-        if n.id in document_title_ids:
-            return f"# {h}"
         if n.heading_type == "appendix" or n.level == 1:
             return f"## {h}"
         if n.level == 2:
@@ -1612,34 +1604,6 @@ def _build_plain_subtree(root: SectionNode) -> dict[str, str]:
     return cache
 
 
-# 文書タイトル相当のノード id を抽出する。
-# 条件: heading が「総則」または「前文」で始まり、その node.level がツリー全体で
-# 最浅レベル、かつ最浅レベルにそのノードしか存在しない（=文書全体のラッパーとして機能）。
-# 文書によっては該当無しでも構わない。
-def _identify_document_title_ids(root: SectionNode) -> set[str]:
-    all_nodes: list[SectionNode] = []
-
-    def _collect(n: SectionNode) -> None:
-        for c in n.children:
-            all_nodes.append(c)
-            _collect(c)
-
-    _collect(root)
-    valid = [n for n in all_nodes if n.level >= 1]
-    if not valid:
-        return set()
-
-    min_level = min(n.level for n in valid)
-    nodes_at_min = [n for n in valid if n.level == min_level]
-    if len(nodes_at_min) != 1:
-        return set()
-
-    n = nodes_at_min[0]
-    if _TITLE_HEADING_RE.match(n.heading.strip()):
-        return {n.id}
-    return set()
-
-
 # 行頭の Markdown 箇条書き "- " があるか。flatten 後の見た目調整で既存リストとの重複を避ける。
 def _chunk_has_markdown_list_dash(text: str) -> bool:
     return bool(re.search(r"(?:^|\n)- ", text))
@@ -1689,10 +1653,8 @@ def flatten_chunks(
         metadata_builder = default_metadata_builder
 
     doc_root_id = "doc_" + hashlib.sha256(root.heading.encode()).hexdigest()[:8]
-    # 最浅 level にユニーク存在する 総則/前文 を文書タイトルとして識別 ("# " 装飾用)。
-    document_title_ids = _identify_document_title_ids(root)
     # ツリー全体を再帰的にマークダウン化。各 node.id → 装飾済みテキスト (自身 + 全子孫)。
-    formatted_by_id = _format_subtree(root, document_title_ids, config)
+    formatted_by_id = _format_subtree(root, config)
     chunks: list[dict] = []
 
     # チャンク 1 件分の metadata を組み立てる。
@@ -1755,9 +1717,7 @@ def flatten_chunks(
         h = a.heading.strip()
         if not h:
             return ""
-        if a.id in document_title_ids:
-            md_prefix = "# "
-        elif a.heading_type == "appendix" or a.level == 1:
+        if a.heading_type == "appendix" or a.level == 1:
             md_prefix = "## "
         elif a.level == 2:
             md_prefix = "### "
@@ -1772,10 +1732,19 @@ def flatten_chunks(
         return f"{md_prefix}{h}"
 
     # 祖先（document_root を除く）の見出しを各層 1 行ずつ並べた prefix を返す。
-    # document_title_ids に該当するノードが ancestors に含まれる場合は # 行になる。
     # 子・孫・親チャンクのいずれも本文先頭に同じルールで付与し、metadata の祖先系と一致させる。
+    # path_text の最先頭要素 (root.heading) を文書タイトルとして # 付きで先頭に追記する。
+    # 文書冒頭が章 / 条等の見出し記法だった場合は重複表示を避けるため追記しない。
     def _build_ancestor_prefix(ancestors: list[SectionNode]) -> str:
         lines: list[str] = []
+        title = root.heading.strip()
+        if title and _classify_heading_line(title) is None:
+            h = title
+            if len(h) > LINE_LONG_MIN:
+                m = _HEADING_LINE_PREFIX_RE.match(h)
+                if m and m.end() > 0:
+                    h = h[:m.end()]
+            lines.append(f"# {h}")
         for a in ancestors:
             if a.heading_type == "document_root":
                 continue
