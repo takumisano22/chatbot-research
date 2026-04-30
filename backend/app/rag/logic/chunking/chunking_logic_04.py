@@ -132,7 +132,7 @@ class ChunkingConfig:
     output_markdown: bool = True
     # max_chunk_chars: この文字数を超えるセクションは子ノードへ分割委譲する。
     # 収まる場合は子孫テキストを含めて1チャンクにまとめ、重複を防ぐ。
-    max_chunk_chars: int = 1500
+    max_chunk_chars: int = 1000
 
 
 @dataclass
@@ -1660,8 +1660,9 @@ def _demote_standalone_h4_prefixes_to_bullets(text: str) -> str:
 # 同じ装飾結果を共有でき、孫境界での分割も装飾済みテキスト行を境界に行える。
 #
 # 分割戦略 (structure_aware_v4):
-#   - level==1 (章相当)  → 親チャンク。max_chunk_chars 超過時は装飾済みテキストを
-#                         "### " 行 (子=条境界) で _split_at_block_boundary 分割。
+#   - level==1 (章相当)  → 親チャンク。子・孫と同様 ancestors を _build_ancestor_prefix で
+#                         本文先頭へ追記（metadata の ancestor と揃える。典型は ancestors が空）。
+#                         max_chunk_chars 超過時は装飾済みテキストを "### " 行 (子境界) で分割。
 #   - level==2 (条相当)  → 子チャンク。本文（見出し除く）が空行を除き 2 行以上で採用。
 #                         親章内に基準を満たす同 heading_type が 1 つでもあれば本文 1 行も
 #                         昇格採用する（見出しのみ＝本文 0 行は除外）。
@@ -1771,7 +1772,8 @@ def flatten_chunks(
         return f"{md_prefix}{h}"
 
     # 祖先（document_root を除く）の見出しを各層 1 行ずつ並べた prefix を返す。
-    # 子チャンクには親(章)1 行、孫チャンクには親(章)+子(条) 2 行が並ぶ想定。
+    # document_title_ids に該当するノードが ancestors に含まれる場合は # 行になる。
+    # 子・孫・親チャンクのいずれも本文先頭に同じルールで付与し、metadata の祖先系と一致させる。
     def _build_ancestor_prefix(ancestors: list[SectionNode]) -> str:
         lines: list[str] = []
         for a in ancestors:
@@ -1868,14 +1870,18 @@ def flatten_chunks(
             grandchild_chunk_id=grandchild_chunk_id,
         )
 
+        # 子・孫チャンクと同様、祖先見出し（# 資料タイトル含む）を本文先頭へ追記する。
+        ancestor_prefix = _build_ancestor_prefix(ancestors)
+        assembled = f"{ancestor_prefix}\n{formatted}" if ancestor_prefix else formatted
+
         # 収まるならそのまま 1 チャンク。
-        if len(formatted) <= config.max_chunk_chars:
-            _emit_parts([formatted], **kw)
+        if len(assembled) <= config.max_chunk_chars:
+            _emit_parts([assembled], **kw)
             return
 
         # 章サイズ超過: 子(条)= "### " 行を境界に均等分割。
-        # 装飾済みテキスト上の境界なので、文章途中での切断が起きない。
-        parts = _split_at_block_boundary(formatted, "### ", config.max_chunk_chars)
+        # ancestor_prefix 行は "### " で始まらないため各分割パート先頭に残る。
+        parts = _split_at_block_boundary(assembled, "### ", config.max_chunk_chars)
         _emit_parts(parts, **kw)
 
     # level==2（条）→ 子チャンク
