@@ -22,3 +22,5 @@ RP-RQ-0001.yaml
 RP-Q-0004.yaml
 RP-Q-0005.yaml
 RP-E-0001.yaml
+RP-rE-0001.yaml
+RP-rQ-0001.yaml
