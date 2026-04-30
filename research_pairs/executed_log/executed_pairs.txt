@@ -31,3 +31,5 @@ RP-Q-chunk4-0001.yaml
 RP-G-chunk4-0001.yaml
 RP-G-chunk4-0001r.yaml
 RP-G-chunk4-0001rr.yaml
+RP-G-chunk4-0003.yaml
+RP-G-chunk4-0004.yaml
