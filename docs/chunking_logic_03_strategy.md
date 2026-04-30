@@ -2,48 +2,47 @@
 
 ## 概要
 
-`chunking_logic_03.py` は、法規・規程類などの構造化文書を対象とした **構造認識チャンク化 (structure_aware)** を実装する。  
-文書の章・条階層を自動推定し、RAG 投入用のチャンク配列を生成する。
+`chunking_logic_03.py` は、法規・規程類など **見出し階層のある構造化文書** を対象とした **構造認識チャンク化** を実装する。メタデータ上の戦略名は **`structure_aware_v4`**。
+
+- 章・条・列挙などの **見出しタイプを行頭パターン＋スコアで候補化**し、**グループ統計**と **ツリー構築後のスコープ内再帰スコア**で level（外側／内側）を決める。
+- **level 1＝親チャンク（章相当）、level 2＝子チャンク（条相当）** を RAG の主単位とし、**level 3 以上は独立チャンク化しない**（装飾済み本文として親／子に内包）。
+- 公開 API は **`split_for_rag_with_metadata`**。内部で `ChunkingConfig(max_chunk_chars=chunk_size)` を組み立て、**引数 `chunk_size` の既定は 800**（`ChunkingConfig` 単体の `max_chunk_chars` 既定は **500**）。返却時は **`text` が空の要素を除外**。`chunk_overlap` は互換のため受け取るのみで **未使用**。
 
 ---
 
 ## 方針
 
-法規・規程類のように「章 → 条 → 項 → 列挙」といった見出し階層を持つ文書を、
-**人手で階層ルールを与えずに、文中のパターンから階層を動的に推定して切る** ことを狙う。
+「章 → 条 → 項 → 列挙」のような階層を、**固定ルールのみ**ではなく **文中パターンと統計から動的に推定**する。
 
-主な考え方は以下:
+1. **見出し候補を行単位の特徴量スコアで抽出する**  
+   行頭の `DEFAULT_HEADING_RULES` 一致を起点に、直前空行・行長・章／条／附則・項・括弧題名・句点・URL 風文字列などを加減点し、`min_heading_score` 未満を捨てる。**附則／第N章／第N条** は、OCR で本文が同行した **長行でも** `max_heading_line_length` を超えていれば候補に残せる（その他のタイプは超過行はスキップ）。
 
-1. **見出し候補を“行単位の特徴量スコア”で抽出する**
-  行頭の正規表現一致を起点に、直前空行・行長・括弧題名・句点・URL の有無などを加減点し、
-   一定スコア以上の行だけを見出し候補として残す。誤検出をスコアで吸収する設計。
-2. **見出しタイプの“外側らしさ”を統計と再帰スコアで決める**
-  出現間隔・連番一貫性・他タイプの内包度・スコープ内カバレッジなどから、
-   どの見出しタイプを章 (level 1) / 条 (level 2) / 列挙 (level 3 以下) に置くかを決定する。
-   グローバル統計で大枠を決めた後、各スコープ内で再帰的に再評価することで、
-   「章が 1 件しか無い小規模規程」など固定優先度では拾えない構造にも対応する。
-3. **RAG 投入単位は親(章)/子(条)の 2 層に正規化する**
-  level 1 を親チャンク、level 2 を子チャンクとし、level 3 以上は親/子本文に内包する。
-   これにより検索時のヒット粒度を「条」に揃え、章単位の文脈も親チャンクで保つ。
-4. `**max_chunk_chars` 超過時は子境界を尊重して均等分割する**
-  親が大きすぎる場合は子(条)境界で均等にグルーピングして連結し、
-   各分割の先頭に章見出しを prefix として付与する。条文の途中で機械的に切れることを避ける。
-5. **見出しのみ・1 行本文の条はノイズ抑制のため除外/昇格を切り分ける**
-  2 行以上の本文を持つ条は無条件採用。1 行本文は同章内に基準を満たす同種の条があれば昇格採用。
-   本文 0 行(見出しのみ)は検索ノイズになるため常に除外する。
+2. **見出しタイプの「外側らしさ」を統計と再帰スコアで決める**  
+   `analyze_heading_groups` で間隔・連番・内包・リセット等を集計し `infer_heading_levels` で大枠の level を付与したうえで、`build_section_tree` 後に **`_rebuild_tree_by_recursive_scoring`** によりスコープごとに level を振り直す。**章が 1 件しかない小規模規程**など、グローバル優先だけでは崩れる構造を拾う。
+
+3. **RAG 投入単位は主に親／子の 2 層**  
+   level 1 を親、level 2 を子とし、level 3 以上は **別チャンクとして出さない**（検索粒度を条に寄せつつ、章まとまりは親で保持）。
+
+4. **`max_chunk_chars` 超過時は装飾後テキストの「ブロック境界」で分割する**  
+   ツリー構築後、**先に `_format_subtree` でマークダウン装飾**した文字列に対し、親（level 1）は **`### ` で始まる行（条の見出し）**、子（level 2）は **`#### ` で始まる行（孫＝列挙見出し）** を境界に **`_split_at_block_boundary`** でグルーピングし、`_group_items_balanced` で長さを抑える。**ブロックが取れない／prefix だけで上限を食い潰す**場合は **`_split_text_evenly`**。境界より前の行は **分割された各パート先頭に共通 prefix** として付く（旧来の「章見出しだけを機械的に付けて均等切り」ではない）。
+
+5. **見出しのみ・1 行本文の条は除外と昇格を分ける**  
+   採否は **`_meaningful_body_lines`**（装飾済みテキストの **先頭 1 行を見出しとして除いた**非空行数）。**2 行以上は採用**。**1 行**は、**同一親（章）配下に同 `heading_type` で 2 行以上本文の兄弟が 1 件でもあれば昇格**。**0 行（見出しのみ）は除外**（昇格もしない）。子チャンク生成前に **`_collapse_enumeration_blanks`** をもう一度当てる（冪等）。
 
 ---
 
 ## 処理フロー
 
 ```
-入力テキスト
-  └─ 1. normalize_text()              — 行内見出し分割 / 空行整備 / 列挙空行詰め
-  └─ 2. extract_heading_candidates()  — 行単位でスコアリングし見出し候補を抽出
-  └─ 3. analyze_heading_groups()      — 見出しタイプごとに統計を計算
-  └─ 4. infer_heading_levels()        — タイプ別「外側らしさスコア」で階層を推定
-  └─ 5. build_section_tree()          — スタックベースで親子ツリーを構築 → 再帰スコアで再構築
-  └─ 6. flatten_chunks()              — ツリーをチャンク配列へ平坦化（マークダウン記法付与）
+split_for_rag_with_metadata(text, chunk_size, …)
+  └─ normalize_text()
+  └─ extract_heading_candidates()
+  └─ analyze_heading_groups()
+  └─ infer_heading_levels()
+  └─ build_section_tree()  → _rebuild_tree_by_recursive_scoring()
+  └─ _identify_document_title_ids()   … 総則／前文が最浅 level でユニークなとき # 用
+  └─ _format_subtree()                 … node.id → 装飾済み全文（子内は _classify_grandchild_levels）
+  └─ flatten_chunks()                  … 長さ超過時のみ _split_at_block_boundary(### / ####)
 ```
 
 ---
@@ -52,164 +51,137 @@
 
 ### 1. normalize_text
 
-チャンク抽出前の正規化として以下を順に行う。
+`enable_inline_heading_repair=True`（既定）のとき **1→2** を実行。`False` のとき **両方スキップ**。
 
-1. `**_split_embedded_headings**` — 行内に埋め込まれた強見出し (`...する。第10条（服務）...`) を行分割。
-  ただし「労働基準法第89条に基づき」のような文中参照(`_INLINE_REF_RE`)は分割しない。
-2. `**_ensure_blank_before_headings**` — `第n章 / 第n条 / 附則` など強見出し行の直前に空行が無ければ挿入する。
-  後段の「直前が空行か」判定(スコア加点)を確実に効かせるための前処理。
-3. `**_split_heading_linebreaks**` — 上が見出し行・下が日本語文の二重改行のみを 1 改行へ詰める(構造文書専用)。
-4. `**_collapse_enumeration_blanks**` — `1.` `2.` 等の **同タイプ + +1 連続** 列挙アイテム間の空行のみを詰める。
-  章・条等の強見出しは対象外(別ノード境界を飲み込まないため)。
+1. **`_split_embedded_headings`** — 行内の **附則／第N章／第N条** を分割（`...する。第10条（服務）...`）。**文中参照**は `_INLINE_REF_RE` で判別し分割しない（例: 「労働基準法第89条に基づき」）。
+2. **`_split_embedded_enumerations`** — 行内の **弱い列挙**（`1.`、`（1）`、漢数字括弧など）を分割。直前文字が境界パターンで、かつ参照接尾でない場合のみ。
+3. **`_ensure_blank_before_headings`** — 強見出し行の直前が非空なら空行挿入（直前空行スコアの安定化）。
+4. **`_split_heading_linebreaks`** — 見出し行のあとの **余計な二重改行** だけ詰める（構造文書向け。全行ペアを無差別に詰めない）。
+5. **`_join_soft_linebreaks`** — 和文途中の **単独改行**（OCR 等）を、次行が見出しパターンでなければ結合。
+6. **`_collapse_enumeration_blanks`** — `_classify_enum_item` が **同タイプかつ番号 +1 連続** と認める列挙行のあいだの **空行だけ** 除去。章・条境界は壊さない。
 
 ---
 
 ### 2. extract_heading_candidates
 
-各行を `DEFAULT_HEADING_RULES`(正規表現 12 種)でマッチし、以下の特徴量でスコアリング。章条は加点はするが、限定はしない。
+`DEFAULT_HEADING_RULES` は **12 種**（リスト先頭ほど priority が高い）。最初にマッチしたルールを採用。
 
-判別するパターンは、1.：1.2.3：（１）：◦項目：-項目：Ⅲ　など。
+判別するパターンの例: 附則、第N章／条／項、`1.1`、`1.`／`2．`（2 桁まで・小数除外）、`（1）`、`（一）`、ローマ数字・英字番号、`○`、`-` / `・` 等。
 
+| 要素 | 加点 / 減点（実装定数） |
+| --- | --- |
+| ルール一致（基礎点） | +4.0 (`LINE_SCORE_BASE`) |
+| 直前が空行 | +1.0 |
+| 行長 ≤ 40 | +1.0 |
+| 第n章 / 第n条 / 附則 | +4.0 |
+| 第n項 | +2.0 |
+| 括弧付き補足（`（…）` 1〜30 文字） | +2.0 |
+| `。` `.` `．` で終わらない | +1.0 |
+| 行長 > 60 | −2.0 |
+| `。` と `．` の合計が 2 以上 | −2.0 |
+| URL / メール風 | −3.0 |
 
-| 要素                | 加点/減点 |
-| ----------------- | ----- |
-| ルールに一致(基礎点)       | +4.0  |
-| 直前が空行             | +1.0  |
-| 行長 ≤ 40 文字        | +1.0  |
-| `第n章 / 第n条 / 附則`  | +4.0  |
-| `第n項`             | +2.0  |
-| 括弧付き補足あり (`（題名）`) | +2.0  |
-| 句点で終わらない          | +1.0  |
-| 行長 > 60 文字        | −2.0  |
-| 句点が 2 つ以上         | −2.0  |
-| URL・メール含む         | −3.0  |
+`min_heading_score`（既定 3.0）未満は除外。最後に **`_award_sequence_bonus`**: 同 `marker_type` で int 値が **+1 連続なら +2.0**、**1 へリセットなら +0.5**。
 
-
-`min_heading_score`(デフォルト 3.0)未満は除外。
-最後に **連番ボーナス** を付与する: 同タイプで番号が +1 連続なら +2.0、1 へリセットなら +0.5。
-
-> 注: 旧バージョンの `インデント 0 (+1.0)` は基礎点 (`LINE_SCORE_BASE = 4.0`) に吸収済み。
-> 正規化後は左寄せ前提のため、独立加点は廃止。
+> 注: 旧版の「インデント 0 の加点」は `LINE_SCORE_BASE` に吸収済み。
 
 ---
 
 ### 3. analyze_heading_groups
 
-タイプ別に以下の統計を算出し、階層推定の材料にする。
+タイプ別に階層推定用の統計を計算する。
 
-- **average_gap**: 出現間隔の平均(外側ほど広い)
-- **sequence_score**: 番号連続性 (0.0–1.0)。短列(n<2)時は判断保留として 0.5 を返す
-- **containment_score**: A の各区間に B が何件入るかの内包率(`avg_gap` 比較で外側候補に限定)
-- **reset_score**: 内包タイプの番号が区間先頭で 1 にリセットされる割合
+- **average_gap**: 出現間隔の平均（外側ほど広い傾向の材料）。
+- **sequence_score**: `_sequence_score(..., short_default=0.5)` — 番号列の **+1 連続** と **1 リセット**（重み 0.5）。**n < 2** は **0.5**（判断保留）。
+- **containment_score** / **reset_score**: `GAP_OUTER_RATIO`（0.8）で「A が B より外側候補」とみなせる場合のみ比較し、A の区間内の B の内包・先頭 1 リセットを集計。
+- **fallback_priority**: ルール定義順から算出（先頭ほど大）。
 
 ---
 
 ### 4. infer_heading_levels
 
-各タイプの「外側らしさスコア」を計算し、降順ソートで level 1, 2, 3... を割り当てる。
+**`min_group_count` 未満**のタイプはランキングから外し **`default_level_hint`**（`max_depth` で切り詰め）を使用。
+
+残りは「外側らしさ」でソートし level 1, 2, … を割当:
 
 ```
-外側らしさスコア =
+スコア =
   containment_score × 4.0
   + reset_score       × 3.0
   + sequence_score    × 1.0
-  + (fallback_priority / 13) × 1.5
-  + gap_score（avg_gap / text_len * 10、上限 2.0）
+  + (fallback_priority / (ルール数 + 1)) × 1.5   … 現状 12 ルールなので÷13
+  + min(avg_gap / text_len × 10, 2.0)
 ```
 
-出現数が `min_group_count`(デフォルト 2)未満のタイプ(例: 附則)は推定対象外とし、
-ルール定義の `default_level_hint` をそのまま使う。
-`enable_level_inference = False` の場合は推定を行わずすべて hint で埋める。
+`enable_level_inference=False` のときは **全候補を hint のみ**で埋めて終了。
 
 ---
 
 ### 5. build_section_tree
 
-スタックベースで見出し候補を親子ツリーへ組み立て、後処理として
-`**_rebuild_tree_by_recursive_scoring()**` を実行する。
+1. `inferred_level` でスタックにより親子ツリー化。各区間の `text` は次の **同階層以上の見出し** まで。
+2. **`_rebuild_tree_by_recursive_scoring`**: ノードを扁平化し、`_assign_levels_recursive` でスコープ内の **`_score_type_in_scope`** により type を選び level を付け直し、再スタックして `text` を再計算。
 
-`**_rebuild_tree_by_recursive_scoring` の役割**
-ルートスコープから再帰的に降りながら、各スコープ内で見出しタイプごとのスコアを再計算し、
-最高スコアのタイプにそのスコープの level を割り当てる。グローバル統計だけでは
-拾えない局所構造(章 1 件しかない小規模規程など)にも適応させる狙い。
+**`_score_type_in_scope` の重み**（実装どおり）:
 
-`_score_type_in_scope` のスコア指標(各重み):
+- **containment** ×5.0: 別 type の **+1 連続（≥2 ノード）** を内包する区間の比率（`_interval_containment`）。
+- **sequence** ×2.5: `marker_value` の連番性（スコープ内は short 時 **デフォルト 0.0**）。
+- **coverage** ×1.5: スコープ内の位置範囲。単独ノードは先頭 15% ゾーンかどうかで別スコア。
+- **frequency** ×0.7: log 正規化した出現数。
+- **priority** ×0.5: ルール順由来の tie-breaker。
+- **preferred** ×2.0: **ひとつ上のスコープ**で「採用された hint より **内側**の type のうち **最高スコアの 1 つ**」として **`next_preferred` に入ったタイプ**にだけ、**直下スコープの評価で**加算（章→条→列挙の階層維持用）。
 
-- **containment** (×5.0): 自身の連続区間内に、別タイプの「+1 連続パターン (≥2 件)」を含む区間の比率
-- **sequence** (×2.5): 自身の marker_value の +1 連続性
-- **coverage** (×1.5): スコープ内での位置範囲(広いほど外側らしい)
-- **frequency** (×0.7): 出現数の log スケール(頻度の偏り抑制)
-- **priority** (×0.5): ルール定義順から導く tie-breaker
-- **preferred** (×2.0): 上位スコープで「内側で最も有力」と認定されたタイプへの bias
-(章 → 条 → 列挙の階層を保つため、少数派が多数派の列挙に競り負けないようにする)
+採用 type と **同一 `default_level_hint` かつ正スコア**の他 type も **同じ level に昇格**（例: 附則と章の並列）。
 
-採用後、ベストと同じ `default_level_hint` を持ち正スコアの他タイプも同 level へ昇格させる
-(章と附則を level 1 へ並列配置するケースなど)。
-
-見出しが 1 つも検出されない場合は `_add_paragraph_fallback()` で段落単位のノードを生成する。
+見出し候補が **0 件**で `fallback_to_paragraph` なら **`_add_paragraph_fallback`**。
 
 ---
 
-### 6. flatten_chunks (structure_aware_v4)
+### 6. `_format_subtree` と flatten_chunks
 
+**`output_markdown=True`（既定）** のとき、装飾ルールは次のとおり（`_format_subtree`）。
 
-| ノード条件                         | 出力チャンク種別              |
-| ----------------------------- | --------------------- |
-| `level == 1`(章・附則相当)          | **親チャンク**             |
-| `level == 2`(条相当)             | **子チャンク**             |
-| `level >= 3`                  | 独立チャンク化しない(親/子本文に含める) |
-| `heading_type == "paragraph"` | フォールバック(見出し抽出失敗時のみ)   |
+| 条件 | 行頭 |
+| --- | --- |
+| `_identify_document_title_ids` に該当（**総則／前文** が最浅 level で **1 ノードだけ**） | `# ` |
+| `appendix` または **level 1** | `## ` |
+| **level 2**（条） | `### ` |
+| **level 3** | `#### ` |
+| **level ≥ 4**（ツリー上のより深い見出し） | `- ` |
 
+**level 2 ノード**の本文行について、**自分より内側の `default_level_hint`** を持つ行を列挙し **`_classify_grandchild_levels`**（type 横断スタック）で **孫＝`####`、ひ孫＝`-`** に振り分ける（ツリー上は level 3 にまとまっていても **表示だけ**階層化）。
 
-#### 親チャンク (level == 1)
+**`flatten_chunks`**:
 
-- `max_chunk_chars`(デフォルト 1500)以内 → 子孫テキストを含む 1 チャンク
-- 超過時 → 子(条)境界を尊重した均等分割。各分割の先頭に章見出し prefix を付与
-- 子が無く prefix だけで超過するケースは文字数ベースの単純均等分割
+| ノード | 出力 |
+| --- | --- |
+| level 1 | 親チャンク。超過時 `### ` 境界で分割 |
+| level 2 | 子チャンク。超過時 `#### ` 境界で分割 |
+| level ≥ 3 | 独立チャンクにしない |
+| `paragraph` | フォールバックツリー由来の葉 |
 
-#### 子チャンク (level == 2)
-
-採用基準(本文の空行を除いた行数):
-
-- **2 行以上** → 無条件採用
-- **1 行** → 同章内に「2 行以上の同種条」が 1 つでも存在すれば昇格採用
-- **0 行(見出しのみ)** → 除外(昇格対象でも除外)
-
-`max_chunk_chars` を超える条は見出しを先頭に付与しつつ均等分割。
-
-#### マークダウン記法の付与 (`output_markdown = True` 時)
-
-チャンク本文中の見出し行に対し以下の記法を付与する。
-
-- 親(章)見出し → `###` (`附則 / 総則 / 前文` 等の例外的ノードは `**...`**)
-- 子(条)見出し → 親チャンク内では `##` 、子チャンク自身では `##` 
-- 列挙見出し → `#` 
-- 構造ツリーから漏れた行も、採用された heading_type と一致するなら同じ記法を補完する
+整形結果が **`min_child_text_length` 未満**は出力しない。チャンク **0 件**のときはルートを 1 件で補償。複数パート時は chunk id に **`_p0`, `_p1`, …**。
 
 ---
 
-## 主要な設定パラメータ (ChunkingConfig)
+## 主要な設定パラメータ（ChunkingConfig）
 
-
-| パラメータ                          | デフォルト | 意味                      |
-| ------------------------------ | ----- | ----------------------- |
-| `max_depth`                    | 4     | 階層の上限                   |
-| `min_heading_score`            | 3.0   | 見出し採用の最低スコア             |
-| `min_group_count`              | 2     | 統計推論に使う最小出現数            |
-| `max_heading_line_length`      | 80    | 見出しとみなす最大文字数            |
-| `min_child_text_length`        | 10    | 子チャンクとして残す最小本文長         |
-| `enable_level_inference`       | True  | グループ統計から level を推論する    |
-| `enable_inline_heading_repair` | True  | 行内に埋め込まれた強見出しを行分割する     |
-| `fallback_to_paragraph`        | True  | 見出し未検出時に段落単位フォールバック     |
-| `output_markdown`              | True  | チャンク本文をマークダウン見出し記法で整形する |
-| `max_chunk_chars`              | 500   | チャンク最大文字数(超過時に分割)       |
-
+| パラメータ | デフォルト | 意味 |
+| --- | --- | --- |
+| `max_depth` | 4 | level の上限 |
+| `min_heading_score` | 3.0 | 見出し候補の下限スコア |
+| `min_group_count` | 2 | 統計推論対象とする最小件数 |
+| `max_heading_line_length` | 80 | 通常行の最大長（**強見出し行は例外**） |
+| `min_child_text_length` | 10 | チャンクとして出す最小文字数 |
+| `enable_level_inference` | True | グループ統計で level を推論 |
+| `enable_inline_heading_repair` | True | 行内強／弱見出し分割を行う |
+| `fallback_to_paragraph` | True | 見出し 0 件時に段落フォールバック |
+| `output_markdown` | True | 上記マークダウン装飾 |
+| `max_chunk_chars` | 500 | 1 チャンクの上限（API では `chunk_size` で上書き） |
 
 ---
 
-## チャンクのメタデータ
-
-各チャンクには以下のフィールドが付与される (`default_metadata_builder`)。
+## チャンクのメタデータ（`default_metadata_builder`）
 
 ```json
 {
@@ -223,10 +195,6 @@
 }
 ```
 
-`chunk_role` は `level == 1` で `parent`、`level >= 2` で `child`、
-`heading_type == "paragraph"` (フォールバック時) で `fallback` となる。
-
-`metadata_builder` 引数に独自関数を渡すことで、`doc_id` や `source` などのフィールドを追加できる。
-`flatten_chunks(metadata_builder=...)` のシグネチャは `default_metadata_builder` と同一の
-キーワード専用引数 (`chunk_id` / `node` / `path` / `section_parent_id` / `ancestor_chain` /
-`doc_root_id` / `split_index` / `split_total`) を受け取る。
+- **`chunk_role`**: `heading_type == "paragraph"` → `fallback`、**level == 1** → `parent`、**それ以外** → `child`（level ≥ 3 が独立化した場合も実装上は `child`）。
+- 分割時は **`split_index` / `split_total`** が builder に渡る。
+- **`flatten_chunks(metadata_builder=...)`** は `default_metadata_builder` と同じ **キーワード専用引数**（`chunk_id`, `node`, `path`, `section_parent_id`, `ancestor_chain`, `doc_root_id`, `split_index`, `split_total`）を取る関数を差し替え可能。
