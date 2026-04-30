@@ -37,12 +37,16 @@ MetadataBuilder = Callable[..., dict[str, Any]]
 #                       -> _interval_containment()
 #                       -> _sequence_score()
 #        -> _add_paragraph_fallback()  ← 見出しゼロ時のみ
+#   -> _identify_document_title_ids()  ← 文書タイトル候補ノード id を抽出
+#   -> _format_subtree()                ← ツリー全体を再帰的にマークダウン化
+#        -> _classify_grandchild_levels() ← 子チャンク内の孫/ひ孫を type 横断で分離
+#        -> _classify_heading_line()
 #   -> flatten_chunks()
 #        -> default_metadata_builder()  ← 差し替え可
 #        -> _meaningful_body_lines()
-#        -> _format_chunk_md()
-#        -> _group_items_balanced()
-#        -> _split_text_evenly()
+#        -> _split_at_block_boundary()  ← ###/#### 境界で分割
+#             -> _group_items_balanced()
+#             -> _split_text_evenly()  ← フォールバック
 
 
 # ============================================================
@@ -1206,6 +1210,46 @@ def _split_text_evenly(text: str, max_chars: int) -> list[str]:
     return [p for p in parts if p.strip()] or [text]
 
 
+# 装飾済みテキストを「block_prefix で始まる行」を境界としてブロック分けし、
+# _group_items_balanced で max_chars 以下のチャンクに均等分割する。
+# block_prefix の前にある行は prefix として全チャンクの先頭に付与する。
+# 親チャンク (level=1) の超過時は block_prefix="### " (子境界)、
+# 子チャンク (level=2) の超過時は block_prefix="#### " (孫境界) を渡す。
+# ブロックが取れない / prefix で max を食い潰す場合は文字数ベースの均等分割へフォールバック。
+def _split_at_block_boundary(
+    formatted: str, block_prefix: str, max_chars: int
+) -> list[str]:
+    lines = formatted.split("\n")
+    prefix_lines: list[str] = []
+    blocks: list[list[str]] = []
+    current: list[str] | None = None
+    for line in lines:
+        if line.startswith(block_prefix):
+            if current is not None:
+                blocks.append(current)
+            current = [line]
+        else:
+            if current is None:
+                prefix_lines.append(line)
+            else:
+                current.append(line)
+    if current is not None:
+        blocks.append(current)
+
+    if not blocks:
+        return _split_text_evenly(formatted, max_chars)
+
+    prefix = ("\n".join(prefix_lines).rstrip() + "\n") if any(l.strip() for l in prefix_lines) else ""
+    available = max_chars - len(prefix)
+    if available <= 0:
+        return _split_text_evenly(formatted, max_chars)
+
+    block_texts = ["\n".join(b).strip() for b in blocks]
+    block_sizes = [len(t) + 1 for t in block_texts]
+    groups = _group_items_balanced(block_sizes, available)
+    return [prefix + "\n".join(block_texts[i] for i in g) for g in groups]
+
+
 # サイズ配列を max_per_group 以下に均等分割し、各グループのインデックス配列を返す。
 # 合計が max 以下なら 1 グループにまとめる。
 # それ以外は n=ceil(total/max) を最小分割数とし、target=ceil(total/n) を均等ターゲットとする。
@@ -1278,181 +1322,218 @@ def default_metadata_builder(
     }
 
 
-# ノード text から先頭の見出し行を除いた本文の、空白行を除いた行数。
+# 装飾済みテキストから先頭の見出し行を除いた本文の、空行を除いた行数を返す。
 # 子チャンク採否（>=2）/ 昇格判定（>=1 採用、==0 除外）に使用。
-def _meaningful_body_lines(text: str, heading: str) -> int:
-    body = text.strip()
-    if heading and body.startswith(heading):
-        body = body[len(heading):]
-    return sum(1 for ln in body.split("\n") if ln.strip())
+# _format_subtree の出力は先頭行が見出し ("### 第N条" 等) になるため、先頭 1 行を
+# 飛ばした残り行で空でないものを数える。
+def _meaningful_body_lines(formatted: str) -> int:
+    lines = formatted.strip().split("\n")
+    return sum(1 for ln in lines[1:] if ln.strip())
 
 
-# 子チャンク内の同 heading_type 連番値列を greedy スタックで階層分けする。
+# 子チャンク内の孫候補連番値列を type 横断 greedy スタックで階層分けする。
 # 戻り値: line_index → level (0=孫, 1=ひ孫, ...) の辞書。
 #
-# アルゴリズム:
-#   - 値が現在 top+1 → 同 level 継続
-#   - 値が 1 (リセット) → 新規内側 level を push (ひ孫の開始)
-#   - それ以外 → スタックを下方向に探索し外側 level へ復帰可能なら pop
-#                 復帰不可なら現 level で仮継続
-# heading_type ごとに独立トラッカーを持ち、混在による誤判定を避ける。
+# 入力 candidates: [(line_idx, heading_type, value), ...]
+# 同 heading_type の連番に加え、別 type の連番が孫の配下に出現するケース
+# ("3．次のいずれかの場合" → "(1)..." "(2)..." → "4．...") も同じスタックで扱う。
 #
-# 例: [1, 1, 2, 3, 2, 3, 4]
-#   → [0, 1, 1, 1, 0, 0, 0]  （外側=孫4件、内側=ひ孫3件）
+# アルゴリズム:
+#   top = (top_type, top_value)
+#   - mtype == top_type かつ v == top_value+1 → 同 level continue
+#   - v == 1 (リセット or 別 type の連番開始) → push 新内側 level
+#   - 上記以外 → スタックを下方向に探索し、(d_type, d_value+1) と (mtype, v) が
+#                 一致すれば d まで pop して continue
+#   - マッチなし → push（別 type の中途値開始または不整合）
+#
+# 例:
+#   [(nd,1),(nd,1),(nd,2),(nd,3),(nd,2),(nd,3),(nd,4)]
+#       → [0,1,1,1,0,0,0]   同 type の二重連番 (孫4件 / ひ孫3件)
+#   [(nd,2),(nd,3),(np,1),(np,2),(nd,4),(nd,5)]
+#       → [0,0,1,1,0,0]     別 type の列挙が内側に来るケース
 def _classify_grandchild_levels(
     candidates: list[tuple[int, str, int]],
 ) -> dict[int, int]:
-    by_type: dict[str, list[tuple[int, int]]] = defaultdict(list)
-    for line_idx, mtype, value in candidates:
-        by_type[mtype].append((line_idx, value))
-
+    items = sorted(candidates, key=lambda x: x[0])
     levels: dict[int, int] = {}
-    for items in by_type.values():
-        items.sort(key=lambda x: x[0])
-        stack: list[int] = []
-        for line_idx, v in items:
-            if not stack:
-                stack.append(v)
-                levels[line_idx] = 0
-                continue
-            top = stack[-1]
-            if v == top + 1:
-                stack[-1] = v
-                levels[line_idx] = len(stack) - 1
-                continue
-            if v == 1:
-                stack.append(v)
-                levels[line_idx] = len(stack) - 1
-                continue
-            matched = False
-            for depth in range(len(stack) - 2, -1, -1):
-                if v == stack[depth] + 1:
-                    del stack[depth + 1:]
-                    stack[depth] = v
-                    levels[line_idx] = depth
-                    matched = True
-                    break
-            if not matched:
-                stack[-1] = v
-                levels[line_idx] = len(stack) - 1
+    stack: list[tuple[str, int]] = []
+
+    for line_idx, mtype, v in items:
+        if not stack:
+            stack.append((mtype, v))
+            levels[line_idx] = 0
+            continue
+        top_type, top_v = stack[-1]
+        if mtype == top_type and v == top_v + 1:
+            stack[-1] = (mtype, v)
+            levels[line_idx] = len(stack) - 1
+            continue
+        if v == 1:
+            stack.append((mtype, v))
+            levels[line_idx] = len(stack) - 1
+            continue
+        matched = False
+        for depth in range(len(stack) - 2, -1, -1):
+            d_type, d_v = stack[depth]
+            if mtype == d_type and v == d_v + 1:
+                del stack[depth + 1:]
+                stack[depth] = (mtype, v)
+                levels[line_idx] = depth
+                matched = True
+                break
+        if not matched:
+            stack.append((mtype, v))
+            levels[line_idx] = len(stack) - 1
     return levels
 
 
-# チャンク本文にマークダウン見出し記法を付与する。
-# 適用ルール:
+# セクションツリー全体を再帰的にマークダウン化し、各 node.id → 装飾済みテキスト
+# (自身 + 全子孫を含む) の辞書を返す。flatten_chunks はこの辞書を基に分割保存する。
+#
+# 装飾ルール:
 #   - 文書タイトル相当ノード (総則/前文 が最浅 level かつユニーク) → "# "
 #   - 附則ノード / 親ノード (level=1, 章相当)                       → "## "
 #   - 子ノード (level=2, 条相当)                                    → "### "
 #   - 孫ノード (level=3, 列挙)                                      → "#### "
-#   - ひ孫ノード (孫の内部にネストする同 type 連番)                 → "- "
-#   - それ以外                                                      → そのまま
-# 構造ツリーから漏れた行（候補スコア閾値で落ちた長文項目等）も、子/孫として採用された
-# heading_type に一致する場合は同じ記法を補完付与する。
-# 子チャンク内では孫候補連番を greedy スタックで階層分けし、ひ孫範囲は "- " に切り替える。
-def _format_chunk_md(
-    text: str,
-    node: SectionNode,
-    *,
-    is_parent: bool,
-    is_document_title: bool = False,
+#   - ひ孫ノード (孫の配下にネストする列挙)                         → "- "
+#   - それ以外の本文行                                              → そのまま
+#
+# ひ孫検出は子チャンク (level=2) の装飾時に行う。本文中に出現する内側 type の列挙行
+# (heading_type の default_level_hint が自身より大きいもの) を全て収集し、
+# _classify_grandchild_levels の type 横断スタックで「外側=孫」「内側=ひ孫」を分離する。
+# 構造ツリー上は同じ level=3 にまとめられている同 type の二重連番や、別 type の
+# 列挙が孫の配下に出現するケースを、表示装飾だけで分けるための仕組み。
+def _format_subtree(
+    root: SectionNode,
+    document_title_ids: set[str],
     config: ChunkingConfig,
-) -> str:
+) -> dict[str, str]:
     if not config.output_markdown:
-        return text
+        return _build_plain_subtree(root)
 
-    node_heading = node.heading.strip()
-    child_headings = {c.heading.strip() for c in node.children if c.heading.strip()}
-    grandchild_headings: set[str] = {
-        gc.heading.strip()
-        for child in node.children
-        for gc in child.children
-        if gc.heading.strip()
-    }
-    # 構造ツリーで child / grandchild として認識された heading_type の集合。
-    # 同 type なら、文字列マッチで漏れた行にも同じ記法を補完する根拠とする。
-    child_types: set[str] = {c.heading_type for c in node.children}
-    grandchild_types: set[str] = {
-        gc.heading_type
-        for child in node.children
-        for gc in child.children
-    }
+    cache: dict[str, str] = {}
 
-    # 附則は親と同じ level=1 で並列に並ぶメインノード扱い ("## ")。
-    is_appendix = node.heading_type == "appendix"
+    def _heading_md(n: SectionNode) -> str:
+        h = n.heading.strip()
+        if not h:
+            return ""
+        if n.id in document_title_ids:
+            return f"# {h}"
+        if n.heading_type == "appendix" or n.level == 1:
+            return f"## {h}"
+        if n.level == 2:
+            return f"### {h}"
+        if n.level == 3:
+            return f"#### {h}"
+        # level >= 4 はツリー上のひ孫。装飾は "- " (子チャンク経路でも同様)。
+        return f"- {h}"
 
-    # 子チャンク (is_parent=False) のみ、孫候補（child_types 該当）行の連番値を
-    # 階層分けしてひ孫を識別する。同 type 内で [1, 1, 2, 3, 2, 3, 4] のような
-    # 二重連番列が現れた場合に、内側 (ひ孫) を "- " 装飾へ切り替えるための材料。
-    grandchild_inner_levels: dict[int, int] = {}
-    if not is_parent and child_types:
-        cands: list[tuple[int, str, int]] = []
-        for idx, line in enumerate(text.split("\n")):
-            stripped_l = line.strip()
-            if not stripped_l:
+    # ノードの「自身の本文」= text のうち見出し行と直接の子の領域を除いた部分。
+    def _own_body(n: SectionNode) -> str:
+        children_sorted = sorted(n.children, key=lambda c: c.start_char)
+        if children_sorted:
+            first = children_sorted[0]
+            body = n.text[: first.start_char - n.start_char]
+        else:
+            body = n.text
+        lines = body.split("\n")
+        out: list[str] = []
+        head_skipped = False
+        for line in lines:
+            if not head_skipped and line.strip() == n.heading.strip():
+                head_skipped = True
                 continue
-            cls = _classify_heading_line(stripped_l)
+            out.append(line)
+        return "\n".join(out).strip()
+
+    def _format_child_subtree(n: SectionNode) -> str:
+        """level=2 ノード: 本文中の孫候補を type 横断スタックで階層分けして装飾。"""
+        text_lines = n.text.split("\n")
+        self_hint = _hint_for_type(n.heading_type)
+        node_heading = n.heading.strip()
+
+        # 自身より内側 hint の列挙行 (ひ孫検出の入力候補)
+        cands: list[tuple[int, str, int]] = []
+        for idx, line in enumerate(text_lines):
+            stripped = line.strip()
+            if not stripped or stripped == node_heading:
+                continue
+            cls = _classify_heading_line(stripped)
             if cls is None:
                 continue
             ltype, lvalue = cls
-            if ltype not in child_types or not isinstance(lvalue, int):
+            if not isinstance(lvalue, int):
+                continue
+            if _hint_for_type(ltype) <= self_hint:
                 continue
             cands.append((idx, ltype, lvalue))
-        grandchild_inner_levels = _classify_grandchild_levels(cands)
+        levels = _classify_grandchild_levels(cands)
 
-    # 孫候補行を装飾する共通ロジック。子チャンクではひ孫範囲を "- " に切り替える。
-    def _decorate_grandchild_in_child(stripped: str, idx: int) -> str:
-        lv = grandchild_inner_levels.get(idx, 0)
-        return f"#### {stripped}" if lv == 0 else f"- {stripped}"
-
-    result: list[str] = []
-    heading_found = False
-    for idx, line in enumerate(text.split("\n")):
-        stripped = line.strip()
-        if not stripped:
-            result.append("")
-            continue
-
-        # 1) ノード自身の見出し行
-        if not heading_found and stripped == node_heading:
-            heading_found = True
-            if is_document_title:
-                result.append(f"# {stripped}")
-            elif is_appendix or is_parent:
-                result.append(f"## {stripped}")
-            else:
-                result.append(f"### {stripped}")
-            continue
-
-        # 2) 構造ツリーで採用された child / grandchild との文字列完全一致
-        if stripped in child_headings:
-            # is_parent=True: child=条 → "### " / is_parent=False: child=孫 → "#### " or "- "
-            if is_parent:
-                result.append(f"### {stripped}")
-            else:
-                result.append(_decorate_grandchild_in_child(stripped, idx))
-            continue
-        if stripped in grandchild_headings:
-            # is_parent=True: grandchild=列挙 → "#### " / is_parent=False: ひ孫 → "- "
-            result.append(f"#### {stripped}" if is_parent else f"- {stripped}")
-            continue
-
-        # 3) 採用された type と同じ heading_type の行は補完する。
-        line_class = _classify_heading_line(stripped)
-        if line_class is not None:
-            line_type = line_class[0]
-            if line_type in child_types:
-                if is_parent:
-                    result.append(f"### {stripped}")
-                else:
-                    result.append(_decorate_grandchild_in_child(stripped, idx))
+        head = _heading_md(n)
+        out: list[str] = []
+        head_appended = False
+        for idx, line in enumerate(text_lines):
+            stripped = line.strip()
+            if not stripped:
+                out.append("")
                 continue
-            if line_type in grandchild_types:
-                result.append(f"#### {stripped}" if is_parent else f"- {stripped}")
+            if not head_appended and stripped == node_heading:
+                if head:
+                    out.append(head)
+                head_appended = True
                 continue
+            if idx in levels:
+                lv = levels[idx]
+                out.append(f"#### {stripped}" if lv == 0 else f"- {stripped}")
+                continue
+            out.append(line)
 
-        result.append(line)
+        if not head_appended and head:
+            out.insert(0, head)
+        return "\n".join(out).strip()
 
-    return "\n".join(result)
+    def _format_node(n: SectionNode) -> str:
+        if n.heading_type == "document_root":
+            children_md = [_format_node(c) for c in sorted(n.children, key=lambda c: c.start_char)]
+            return "\n\n".join(c for c in children_md if c)
+
+        if n.level == 2:
+            result = _format_child_subtree(n)
+            cache[n.id] = result
+            return result
+
+        # level=1 (章) や level=3 以上のノード: 自身の見出し + 自身の本文 + 子孫装飾済み。
+        head = _heading_md(n)
+        body = _own_body(n)
+        children_md = [_format_node(c) for c in sorted(n.children, key=lambda c: c.start_char)]
+
+        parts: list[str] = []
+        if head:
+            parts.append(head)
+        if body:
+            parts.append(body)
+        parts.extend(c for c in children_md if c)
+        result = "\n".join(parts)
+        cache[n.id] = result
+        return result
+
+    _format_node(root)
+    return cache
+
+
+# 装飾なしモード (config.output_markdown=False) 時のフォールバック。
+# 各ノードの素のテキストをそのまま辞書化する。
+def _build_plain_subtree(root: SectionNode) -> dict[str, str]:
+    cache: dict[str, str] = {}
+
+    def _walk(n: SectionNode) -> None:
+        if n.heading_type != "document_root":
+            cache[n.id] = n.text.strip()
+        for c in n.children:
+            _walk(c)
+
+    _walk(root)
+    return cache
 
 
 # 文書タイトル相当のノード id を抽出する。
@@ -1485,14 +1566,19 @@ def _identify_document_title_ids(root: SectionNode) -> set[str]:
 
 # セクションツリーを RAG 投入用チャンク配列へ平坦化する。
 #
+# 事前に _format_subtree() でツリー全体をマークダウン化し、各ノードの装飾済みテキスト
+# (自身 + 全子孫) を辞書に保持している。本関数はその辞書を基に分割保存するだけなので、
+# 親と子で同じ装飾結果を共有でき、孫境界での分割も装飾済みテキスト行を境界に行える。
+#
 # 分割戦略 (structure_aware_v4):
-#   - level==1 (章相当)  → 親チャンク。max_chunk_chars 超過時は子(条)境界を尊重した
-#                         均等分割を行い、各分割の先頭に章見出し prefix を付与する。
+#   - level==1 (章相当)  → 親チャンク。max_chunk_chars 超過時は装飾済みテキストを
+#                         "### " 行 (子=条境界) で _split_at_block_boundary 分割。
 #   - level==2 (条相当)  → 子チャンク。本文（見出し除く）が空行を除き 2 行以上で採用。
 #                         親章内に基準を満たす同 heading_type が 1 つでもあれば本文 1 行も
 #                         昇格採用する（見出しのみ＝本文 0 行は除外）。
-#                         単独で max_chunk_chars 超過時のみ見出し付きで均等分割する。
-#   - level>=3           → 独立チャンク化せず親/子チャンク本文に含める。
+#                         単独で max_chunk_chars 超過時は "#### " 行 (孫=列挙境界) で
+#                         _split_at_block_boundary 分割。
+#   - level>=3           → 独立チャンク化せず親/子チャンク本文に含まれる装飾済み行で出力。
 #   - 0 件時             → root を 1 チャンク補償する。
 def flatten_chunks(
     root: SectionNode,
@@ -1505,6 +1591,8 @@ def flatten_chunks(
     doc_root_id = "doc_" + hashlib.sha256(root.heading.encode()).hexdigest()[:8]
     # 最浅 level にユニーク存在する 総則/前文 を文書タイトルとして識別 ("# " 装飾用)。
     document_title_ids = _identify_document_title_ids(root)
+    # ツリー全体を再帰的にマークダウン化。各 node.id → 装飾済みテキスト (自身 + 全子孫)。
+    formatted_by_id = _format_subtree(root, document_title_ids, config)
     chunks: list[dict] = []
 
     # チャンク 1 件分の metadata を組み立てる。
@@ -1548,29 +1636,23 @@ def flatten_chunks(
         return path, ancestor_chain, base_id, section_parent_id
 
     # チャンク本文の配列 parts をまとめて出力する。
+    # parts は既に装飾済みテキスト (_format_subtree の出力 / _split_at_block_boundary の出力)。
     # parts が 1 件なら id をそのまま、2 件以上なら "_p{i}" を付ける。
     def _emit_parts(
         parts: list[str],
         *,
         node: SectionNode,
-        is_parent: bool,
         base_id: str,
         path: list[str],
         section_parent_id: str | None,
         ancestor_chain: list[dict[str, Any]],
     ) -> None:
         n = len(parts)
-        is_doc_title = node.id in document_title_ids
         for pi, part in enumerate(parts):
             cid = f"{base_id}_p{pi}" if n > 1 else base_id
             chunks.append({
                 "id": cid,
-                "text": _format_chunk_md(
-                    part, node,
-                    is_parent=is_parent,
-                    is_document_title=is_doc_title,
-                    config=config,
-                ),
+                "text": part,
                 "metadata": _build_meta(
                     cid, node, path, section_parent_id, ancestor_chain,
                     split_index=pi, split_total=n,
@@ -1579,61 +1661,43 @@ def flatten_chunks(
 
     # level==1（章）→ 親チャンク
     def _emit_parent(node: SectionNode, ancestors: list[SectionNode]) -> None:
-        text = node.text.strip()
-        if not text or len(text) < config.min_child_text_length:
+        formatted = formatted_by_id.get(node.id, "").strip()
+        if not formatted or len(formatted) < config.min_child_text_length:
             return
         path, ancestor_chain, base_id, section_parent_id = _common_meta(node, ancestors)
         kw = dict(
-            node=node, is_parent=True, base_id=base_id,
+            node=node, base_id=base_id,
             path=path, section_parent_id=section_parent_id, ancestor_chain=ancestor_chain,
         )
 
         # 収まるならそのまま 1 チャンク。
-        if len(text) <= config.max_chunk_chars:
-            _emit_parts([text], **kw)
+        if len(formatted) <= config.max_chunk_chars:
+            _emit_parts([formatted], **kw)
             return
 
-        # 章サイズ超過: 子(条)境界で均等分割を試みる。
-        children_with_text = [c for c in node.children if c.text.strip()]
-        if children_with_text:
-            first_child = children_with_text[0]
-            prefix_text = node.text[: first_child.start_char - node.start_char].rstrip()
-        else:
-            prefix_text = ""
-        if not prefix_text:
-            prefix_text = node.heading
-        prefix_line = prefix_text + "\n"
-        available = config.max_chunk_chars - len(prefix_line)
-
-        # prefix だけで超過 or 子無し → 文字数ベースの単純均等分割。
-        if available <= 0 or not children_with_text:
-            _emit_parts(_split_text_evenly(text, config.max_chunk_chars), **kw)
-            return
-
-        # 子境界で均等グルーピング → 各グループを 1 チャンクに連結（+1 は \n 区切り分）。
-        child_texts = [c.text.strip() for c in children_with_text]
-        child_sizes = [len(t) + 1 for t in child_texts]
-        groups = _group_items_balanced(child_sizes, available)
-        parts = [prefix_line + "\n".join(child_texts[i] for i in g) for g in groups]
+        # 章サイズ超過: 子(条)= "### " 行を境界に均等分割。
+        # 装飾済みテキスト上の境界なので、文章途中での切断が起きない。
+        parts = _split_at_block_boundary(formatted, "### ", config.max_chunk_chars)
         _emit_parts(parts, **kw)
 
     # level==2（条）→ 子チャンク
     def _emit_child(node: SectionNode, ancestors: list[SectionNode]) -> None:
-        text = node.text.strip()
-        if not text or len(text) < config.min_child_text_length:
+        formatted = formatted_by_id.get(node.id, "").strip()
+        if not formatted or len(formatted) < config.min_child_text_length:
             return
 
         # 連番列挙に紛れた余計な空行を詰めて見栄えを整える。
-        text = _collapse_enumeration_blanks(text)
+        formatted = _collapse_enumeration_blanks(formatted)
 
-        body_lines = _meaningful_body_lines(text, node.heading)
+        body_lines = _meaningful_body_lines(formatted)
         if body_lines < 2:
             # 親章内に複数行本文を持つ同 heading_type が 1 つでもあれば 1 行本文も昇格採用。
             # 法規類で 2 行以上の条と 1 行の条が混在する章で後者の漏れを防ぐ救済。
             # ただし本文 0 行（見出しのみ）は検索ノイズ抑制のため除外。
             parent = ancestors[-1] if ancestors else None
             promoted = bool(parent) and any(
-                _meaningful_body_lines(c.text.strip(), c.heading) >= 2
+                _meaningful_body_lines(formatted_by_id.get(c.id, ""))
+                >= 2
                 for c in parent.children
                 if c.heading_type == node.heading_type
             )
@@ -1642,27 +1706,19 @@ def flatten_chunks(
 
         path, ancestor_chain, base_id, section_parent_id = _common_meta(node, ancestors)
         kw = dict(
-            node=node, is_parent=False, base_id=base_id,
+            node=node, base_id=base_id,
             path=path, section_parent_id=section_parent_id, ancestor_chain=ancestor_chain,
         )
 
-        if len(text) <= config.max_chunk_chars:
-            _emit_parts([text], **kw)
+        if len(formatted) <= config.max_chunk_chars:
+            _emit_parts([formatted], **kw)
             return
 
-        # 条単独で超過 → 見出しを各チャンク先頭に付与しつつ本文を均等分割。
-        heading_line = node.heading
-        body = text[len(heading_line):].lstrip("\n") if text.startswith(heading_line) else text
-        prefix = f"{heading_line}\n"
-        available = config.max_chunk_chars - len(prefix)
-
-        if available <= 0:
-            # 異常ケース（見出し自体が max_chunk_chars 超）。条文保全のため全文を均等分割。
-            _emit_parts(_split_text_evenly(text, config.max_chunk_chars), **kw)
-            return
-
-        body_parts = _split_text_evenly(body, available)
-        _emit_parts([f"{prefix}{p}" for p in body_parts], **kw)
+        # 条単独で超過 → 孫(列挙)= "#### " 行を境界に均等分割。
+        # 装飾済みテキスト上の境界で分けるので「再延長することがで|きま」のような
+        # 文章途中の切断が発生しない。
+        parts = _split_at_block_boundary(formatted, "#### ", config.max_chunk_chars)
+        _emit_parts(parts, **kw)
 
     # ツリーを再帰的にたどり level に応じて出力する。
     def _walk(node: SectionNode, ancestors: list[SectionNode]) -> None:

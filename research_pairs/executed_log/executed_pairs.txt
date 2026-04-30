@@ -14,7 +14,6 @@ RP-D-0001.yaml
 RP-Q-0001.yaml
 RP-Q-0002.yaml
 RP-Q-0003.yaml
-RP-E-0001.yaml
 RP-E-0002.yaml
 RP-E-0003.yaml
 RP-RC-0004.yaml
