@@ -197,46 +197,53 @@ def _drop_lower_descendants(
 
 
 def _promote_orphan_grandchildren(items: list[_Item]) -> list[_Item]:
-    """子省略（merge_child）ケースで生じる孤立孫を親チャンクへ引き継いで削除する。
+    """step 5 を通過して残った grandchild を親チャンクへ引き継いで削除する。
 
-    孤立孫の定義: chunk_role="grandchild" かつ child_chunk_id に対応する chunk が
-    現在のワークセットに存在しないもの。
-    chunking_logic_06 では子(条)が 1 件のみの場合に子チャンクを emit せず親が兼ねるが、
-    孫は独立 emit されるため、孫の child_chunk_id 先が存在しないギャップが生まれる。
+    step 5 通過後に残る grandchild は、対応する child が存在しない（子省略または
+    step 3 で削除済み）ため step 5 でスルーされた「孤立孫」である。
+
+    注意: RetrievedChunk.chunk_id は chunker.py が振る連番 "{doc_id}:{i}" 形式だが、
+    parent_chunk_id / child_chunk_id は chunking_logic_06 が生成する
+    "chunk_sec_{xxx}" 形式で別の名前空間。よって chunk_id_set による照合は使えない。
+    親チャンクは自身の meta("parent_chunk_id") が自身の section-based base_id と
+    同値になる性質を利用し、同じ値をキーに parent_by_pk でルックアップする。
     """
-    chunk_id_set = {it.chunk.chunk_id for it in items if it.chunk.chunk_id}
-
-    orphans = [
-        it for it in items
-        if it.role == "grandchild"
-        and it.meta("child_chunk_id") is not None
-        and it.meta("child_chunk_id") not in chunk_id_set
-    ]
-    if not orphans:
+    grandchildren = [it for it in items if it.role == "grandchild"]
+    if not grandchildren:
         return items
 
-    # parent_chunk_id でグループ化して対応する親チャンクへ引き継ぐ。
+    # parent_chunk_id（section-based ID）でグループ化する。
     groups: dict[str, list[_Item]] = defaultdict(list)
-    for it in orphans:
+    for it in grandchildren:
         pk = it.meta("parent_chunk_id")
         if pk:
             groups[pk].append(it)
 
-    orphan_set = set(orphans)
+    if not groups:
+        return items
+
+    # 親チャンクを meta("parent_chunk_id") で逆引きする。
+    # 親チャンクは meta("parent_chunk_id") == 自身の section-based ID（自己参照）。
+    parent_by_pk: dict[str, _Item] = {}
+    for it in items:
+        if it.role == "parent":
+            pk = it.meta("parent_chunk_id")
+            if pk is None:
+                continue
+            existing = parent_by_pk.get(pk)
+            if existing is None or it.score > existing.score:
+                parent_by_pk[pk] = it
+
+    orphan_set = set(grandchildren)
     survivors = [it for it in items if it not in orphan_set]
 
-    # chunk_id → _Item の逆引き（親チャンク検索用）。
-    by_chunk_id: dict[str, _Item] = {
-        it.chunk.chunk_id: it for it in survivors if it.chunk.chunk_id
-    }
-
-    for parent_chunk_id_val, grandchildren in groups.items():
-        parent_item = by_chunk_id.get(parent_chunk_id_val)
+    for pk_val, gcs in groups.items():
+        parent_item = parent_by_pk.get(pk_val)
         if parent_item is None:
-            # 親チャンクが取得されていなければ孤立孫をそのまま残す。
-            survivors.extend(grandchildren)
+            # 対応する親チャンクが取得されていなければ grandchild を維持する。
+            survivors.extend(gcs)
             continue
-        donor_score = max(it.score for it in grandchildren)
+        donor_score = max(it.score for it in gcs)
         if donor_score > parent_item.score:
             parent_item.score = donor_score
         # grandchild は削除（survivors には追加しない）。

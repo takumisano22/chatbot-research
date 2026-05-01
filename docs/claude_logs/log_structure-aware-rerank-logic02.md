@@ -94,3 +94,33 @@ step 5 は `child_chunk_id` で `role="child"` のチャンクを探すが存在
 ### 変更ファイル
 
 - `backend/app/rag/logic/reranking/reranking_logic_02.py`: `_promote_orphan_grandchildren` を追加、step 5b として呼び出しを挿入。
+
+---
+
+## 2026-05-01: step 5b のバグ修正（chunk_id 名前空間の不一致）
+
+### 問題
+
+前回の step 5b 実装が機能していなかった。原因は chunk_id の名前空間の不一致：
+
+| 値 | 形式 | 生成元 |
+| -- | ---- | ------ |
+| `RetrievedChunk.chunk_id` | `"{doc_id}:{i}"` (連番) | `chunker.py` |
+| `parent_chunk_id` / `child_chunk_id` (metadata) | `"chunk_sec_{xxx}"` (section-based) | `chunking_logic_06.py` |
+
+前実装では `by_chunk_id`（連番 ID でインデックス）に対して `parent_chunk_id`（section ID）で検索していたため、常に `None` が返り、孤立孫が全件維持されていた。
+
+### 修正
+
+`by_chunk_id` による逆引きをやめ、`parent_by_pk` に切り替える。
+
+**親チャンクの見つけ方:**
+- 親チャンク（role="parent"）は `meta("parent_chunk_id")` が自身の section-based base_id と同値（自己参照）という性質を持つ
+- 孤立孫の `meta("parent_chunk_id")` も同じ section-based ID
+- → `parent_by_pk` を `meta("parent_chunk_id")` でインデックスして照合 ✓
+
+また、step 5 通過後に残る grandchild は「step 5 で対応 child が見つからなかった孤立孫」のみのため、`chunk_id_set` による孤立判定は不要と判断し削除した（step 3-5 は meta 値同士の比較のみなので名前空間問題の影響なし）。
+
+### 変更ファイル
+
+- `backend/app/rag/logic/reranking/reranking_logic_02.py`: `_promote_orphan_grandchildren` を `parent_by_pk` ルックアップ方式で修正。
