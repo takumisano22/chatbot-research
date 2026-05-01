@@ -43,3 +43,4 @@ RP-G-chunk6-0001.yaml
 RP-Q-chunk6-0001.yaml
 RP-C-rerank2-0001.yaml
 RP-G-rerank2-0001.yaml
+RP-C-rerank2-0001r.yaml
