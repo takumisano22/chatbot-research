@@ -32,23 +32,40 @@ jobs:
       - name: Run batch
         shell: cmd
         run: |
+          setlocal enabledelayedexpansion
           docker compose build
+          set PREV_CHUNKING=
+          set PREV_DOCSET=
+          set PREV_PIPELINE=
           for %%F in (research_pairs\*.yaml) do (
-          findstr /x /c:%%~nxF research_pairs\executed_log\executed_pairs.txt >nul
-          if errorlevel 1 (
-            echo runbatch %%~nxF
-            docker compose run --rm experiment_runner --research-pair %%~nF
-            if not errorlevel 1 (
-            if not exist chatbot-scoring\input\csv mkdir chatbot-scoring\input\csv
-            if not exist chatbot-scoring\input\json mkdir chatbot-scoring\input\json
-            copy outputs\csv\%%~nF*.csv chatbot-scoring\input\csv\
-            copy outputs\json\%%~nF*.json chatbot-scoring\input\json\
-            echo %%~nxF>> research_pairs\executed_log\executed_pairs.txt
-            ) else (
-              echo Failed: %%~nxF
-              exit /b 1
+            findstr /x /c:"%%~nxF" research_pairs\executed_log\executed_pairs.txt >nul
+            if errorlevel 1 (
+              set CURR_CHUNKING=
+              set CURR_DOCSET=
+              set CURR_PIPELINE=
+              for /f "tokens=2 delims=: " %%A in ('findstr /b "chunking_logic_id:" "%%F"') do set CURR_CHUNKING=%%A
+              for /f "tokens=2 delims=: " %%A in ('findstr /b "document_set_id:" "%%F"') do set CURR_DOCSET=%%A
+              for /f "tokens=2 delims=: " %%A in ('findstr /b "ingest_pipeline_id:" "%%F"') do set CURR_PIPELINE=%%A
+              set SKIP_FLAG=
+              if defined PREV_CHUNKING (
+                if "!PREV_CHUNKING!"=="!CURR_CHUNKING!" if "!PREV_DOCSET!"=="!CURR_DOCSET!" if "!PREV_PIPELINE!"=="!CURR_PIPELINE!" set SKIP_FLAG=--skip-ingest
+              )
+              echo runbatch %%~nxF !SKIP_FLAG!
+              docker compose run --rm experiment_runner --research-pair %%~nF !SKIP_FLAG!
+              if not errorlevel 1 (
+                if not exist chatbot-scoring\input\csv mkdir chatbot-scoring\input\csv
+                if not exist chatbot-scoring\input\json mkdir chatbot-scoring\input\json
+                copy outputs\csv\%%~nF*.csv chatbot-scoring\input\csv\
+                copy outputs\json\%%~nF*.json chatbot-scoring\input\json\
+                echo %%~nxF>> research_pairs\executed_log\executed_pairs.txt
+              ) else (
+                echo Failed: %%~nxF
+                exit /b 1
+              )
+              set PREV_CHUNKING=!CURR_CHUNKING!
+              set PREV_DOCSET=!CURR_DOCSET!
+              set PREV_PIPELINE=!CURR_PIPELINE!
             )
-          )
           )
       
       - name: commit and push to research
