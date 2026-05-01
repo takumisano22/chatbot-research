@@ -1,0 +1,18 @@
+# サンプル research_pair。実行前に qa_datasets / ingest_document を実データで埋めてください。
+research_pair_id: RP-C-rerank2-0003
+llm_model: llama3.2
+embedding_provider: ruri_http
+embedding_base_url: http://host.docker.internal:8010
+embedding_model: cl-nagoya/ruri-v3-310m
+
+search_logic_id: logic_01
+chunking_logic_id: logic_06
+reranking_logic_id: logic_02
+tokenizer_logic_id: logic_01
+prompt_logic_id: logic_08
+
+top_k: 30
+qa_dataset: standard_qa.json
+document_set_id: DOCSET-0001
+ragas_enabled: false
+langfuse_enabled: false 
