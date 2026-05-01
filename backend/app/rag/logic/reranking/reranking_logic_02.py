@@ -12,10 +12,9 @@ from app.rag.schemas import RetrievedChunk
 # 主な処理:
 #   1. 元データ件数が下限 (_MIN_TOP_K) 未満ならフィルタせずそのまま返す。
 #   2. top_k を 1/6 と 5 の大きい方で再構築する。
-#   3. 全体平均スコアを保持しつつ、metadata の chunk_role / parent_chunk_id /
-#      child_chunk_id を用いて重複・冗長チャンクを段階的に削除し、孫→子→親へ
-#      代表スコアを引き継ぐ。
-#   4. 平均未満を除外し、上位 new_top_k 件を返す。
+#   3. metadata の chunk_role / parent_chunk_id / child_chunk_id を用いて重複・冗長
+#      チャンクを段階的に削除し、孫→子→親へ代表スコアを引き継ぐ。
+#   4. 最高スコアの _SCORE_RETAIN_RATIO 倍未満を除外し、上位 new_top_k 件を返す。
 #
 # 互換性: 必要キーが metadata に無い候補（非構造化チャンクなど）はグループ化
 # 対象から外し、削除や引き継ぎの影響を受けない設計とする。
@@ -24,16 +23,15 @@ from app.rag.schemas import RetrievedChunk
 #   chunking_logic_06 は親章内の子(条)が1件のみの場合、子チャンクを emit せず
 #   親チャンクが子の metadata を兼ねる（child_chunk_id = 親自身の chunk_id）。
 #   一方その子配下の孫は独立 emit されるため、孫の child_chunk_id が指す ID は
-#   ベクトル DB に存在しない。これを「孤立孫」として検出し、step 5b で親へ
+#   ベクトル DB に存在しない。これを「孤立孫」として検出し、step 4b で親へ
 #   引き継いで削除することで親・孫の重複出力を防ぐ。
 # -----------------------------------------------------------------------------
 
 
 _MIN_TOP_K = 5
 _TOP_K_DIVISOR = 6
-# 最大ギャップが平均ギャップの何倍以上であれば「有意な境界」とみなすか。
-# 小さいほど感度が高く（より弱いギャップでも切る）、大きいほど保守的。
-_GAP_SIGNIFICANCE_FACTOR = 2.0
+# ベストスコアに対する保持下限の比率。小さいほど多く残り、大きいほど絞られる。
+_SCORE_RETAIN_RATIO = 0.6
 
 
 def rerank(
@@ -58,13 +56,10 @@ def rerank(
     # final_score を集約用スコアとして使う（vector hit では vector_score_norm と同値）。
     items = [_Item(chunk=c, score=float(c.final_score)) for c in chunks]
 
-    # 1. 全体平均スコアを保持
-    avg_score = sum(it.score for it in items) / len(items)
-
-    # 2. 同一 chunk_id（論理チャンクID）は最高スコアのみへ集約
+    # 1. 同一 chunk_id（論理チャンクID）は最高スコアのみへ集約
     items = _dedupe_by_chunk_id(items)
 
-    # 3. 同一 parent_chunk_id 内に parent がいれば、低スコアの child/grandchild を削除
+    # 2. 同一 parent_chunk_id 内に parent がいれば、低スコアの child/grandchild を削除
     items = _drop_lower_descendants(
         items,
         group_key="parent_chunk_id",
@@ -72,7 +67,7 @@ def rerank(
         drop_roles={"child", "grandchild"},
     )
 
-    # 4. 同一 child_chunk_id 内に child がいれば、低スコアの grandchild を削除
+    # 3. 同一 child_chunk_id 内に child がいれば、低スコアの grandchild を削除
     items = _drop_lower_descendants(
         items,
         group_key="child_chunk_id",
@@ -80,7 +75,7 @@ def rerank(
         drop_roles={"grandchild"},
     )
 
-    # 5. 残った grandchild の最高スコアを同 child_chunk_id の代表 child へ引き継ぎ、
+    # 4. 残った grandchild の最高スコアを同 child_chunk_id の代表 child へ引き継ぎ、
     #    同 child_chunk_id の grandchild は全削除。同 child_chunk_id の child が複数
     #    あった場合は元スコア最高の child のみが受け取る（他の child は維持）。
     items = _promote_score(
@@ -91,12 +86,12 @@ def rerank(
         require_min_from_count=1,
     )
 
-    # 5b. 子省略（merge_child）ケース: step 5 で対応 child が見つからず残った孤立孫を、
+    # 4b. 子省略（merge_child）ケース: step 4 で対応 child が見つからず残った孤立孫を、
     #     parent_chunk_id をキーに親チャンクへ引き継いで削除する。
     #     （孤立孫とは child_chunk_id に対応する chunk が存在しない grandchild のこと）
     items = _promote_orphan_grandchildren(items)
 
-    # 6. 同一 parent_chunk_id に child が 2件以上残っていて parent が居る場合、
+    # 5. 同一 parent_chunk_id に child が 2件以上残っていて parent が居る場合、
     #    child 最高スコアを代表 parent に引き継ぎ、同 parent_chunk_id の child を全削除。
     items = _promote_score(
         items,
@@ -106,13 +101,12 @@ def rerank(
         require_min_from_count=2,
     )
 
-    # 7. ギャップ検出でスコアの不連続点を探し、その下側を除外する。
-    #    明確なギャップがない均質な分布では avg_score にフォールバックする。
-    scores_desc = sorted((it.score for it in items), reverse=True)
-    threshold = _gap_based_threshold(scores_desc, fallback=avg_score)
+    # 6. 最高スコアの _SCORE_RETAIN_RATIO 倍を閾値とし、それ未満を除外する。
+    max_score = max((it.score for it in items), default=0.0)
+    threshold = max_score * _SCORE_RETAIN_RATIO
     items = [it for it in items if it.score >= threshold]
 
-    # 8. 残数 < new_top_k なら topK を残数に修正、そうでなければ上位 new_top_k を返す。
+    # 7. 残数 < new_top_k なら topK を残数に修正、そうでなければ上位 new_top_k を返す。
     items.sort(key=lambda it: it.score, reverse=True)
     if len(items) < new_top_k:
         new_top_k = len(items)
@@ -151,29 +145,6 @@ class _Item:
     def to_chunk(self) -> RetrievedChunk:
         # 引き継ぎ後のスコアを final_score として返却用 chunk に反映する。
         return self.chunk.model_copy(update={"final_score": self.score})
-
-
-def _gap_based_threshold(scores_desc: list[float], fallback: float) -> float:
-    """降順スコアリストから最大ギャップ位置の上側スコアを閾値として返す。
-
-    スコアをギャップで区切り「高品質クラスタ / 低品質クラスタ」に分離する。
-    最大ギャップが平均ギャップの _GAP_SIGNIFICANCE_FACTOR 倍未満の場合は
-    均質な分布とみなし fallback を返す。
-
-    例: [0.95, 0.90, 0.85, 0.60, 0.55, 0.50]
-        gaps = [0.05, 0.05, 0.25, 0.05, 0.05]
-        最大ギャップ 0.25 が avg 0.09 の 2.78 倍 → 閾値 = 0.85
-    """
-    if len(scores_desc) < 2:
-        return fallback
-    gaps = [scores_desc[i] - scores_desc[i + 1] for i in range(len(scores_desc) - 1)]
-    max_gap = max(gaps)
-    avg_gap = sum(gaps) / len(gaps)
-    if avg_gap == 0 or max_gap < avg_gap * _GAP_SIGNIFICANCE_FACTOR:
-        return fallback
-    gap_idx = gaps.index(max_gap)
-    # ギャップの上側スコア（このスコア以上を保持する）
-    return scores_desc[gap_idx]
 
 
 def _dedupe_by_chunk_id(items: list[_Item]) -> list[_Item]:
@@ -226,10 +197,10 @@ def _drop_lower_descendants(
 
 
 def _promote_orphan_grandchildren(items: list[_Item]) -> list[_Item]:
-    """step 5 を通過して残った grandchild を親チャンクへ引き継いで削除する。
+    """step 4 を通過して残った grandchild を親チャンクへ引き継いで削除する。
 
-    step 5 通過後に残る grandchild は、対応する child が存在しない（子省略または
-    step 3 で削除済み）ため step 5 でスルーされた「孤立孫」である。
+    step 4 通過後に残る grandchild は、対応する child が存在しない（子省略または
+    step 2 で削除済み）ため step 4 でスルーされた「孤立孫」である。
 
     注意: RetrievedChunk.chunk_id は chunker.py が振る連番 "{doc_id}:{i}" 形式だが、
     parent_chunk_id / child_chunk_id は chunking_logic_06 が生成する

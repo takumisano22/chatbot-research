@@ -32,16 +32,16 @@
 
 | step | 処理 |
 | ---- | ---- |
-| 0 | 元データ < 5 件は再ランキングをスキップしてそのまま返す（少数データに対する集約は LLM 文脈を痩せさせるため） |
-| 0 | `new_top_k = max(5, top_k // 6)` |
-| 1 | `final_score` の全体平均を保持 |
-| 2 | 同一 `chunk_id` を最高スコアのみへ集約（variant 重複の解消） |
-| 3 | 同一 `parent_chunk_id` 内に `parent` がいれば、それより低スコアの `child`/`grandchild` を削除 |
-| 4 | 同一 `child_chunk_id` 内に `child` がいれば、それより低スコアの `grandchild` を削除 |
-| 5 | 同一 `child_chunk_id` の grandchild 最高スコアを代表 child へ引き継ぎ、grandchild は全削除（child が複数ある場合は元スコア最高の child のみが受け取り、他の child は維持） |
-| 6 | 同一 `parent_chunk_id` に child が 2 件以上残っていて parent が居る場合、child 最高スコアを代表 parent に引き継ぎ、child は全削除（parent が複数ある場合は元スコア最高 parent が受け取り、他の parent は維持） |
-| 7 | step 1 の平均未満を削除 |
-| 8 | 残数 < `new_top_k` なら `new_top_k` を残数に再修正、そうでなければ上位 `new_top_k` 件を返す |
+| - | 元データ < 5 件は再ランキングをスキップしてそのまま返す（少数データに対する集約は LLM 文脈を痩せさせるため） |
+| - | `new_top_k = max(5, top_k // 6)` |
+| 1 | 同一 `chunk_id` を最高スコアのみへ集約（variant 重複の解消） |
+| 2 | 同一 `parent_chunk_id` 内に `parent` がいれば、それより低スコアの `child`/`grandchild` を削除 |
+| 3 | 同一 `child_chunk_id` 内に `child` がいれば、それより低スコアの `grandchild` を削除 |
+| 4 | 同一 `child_chunk_id` の grandchild 最高スコアを代表 child へ引き継ぎ、grandchild は全削除（child が複数ある場合は元スコア最高の child のみが受け取り、他の child は維持） |
+| 4b | merge_child 孤立孫処理: step 4 を通過して残った grandchild を `parent_chunk_id` キーで親へ引き継ぎ・削除する |
+| 5 | 同一 `parent_chunk_id` に child が 2 件以上残っていて parent が居る場合、child 最高スコアを代表 parent に引き継ぎ、child は全削除（parent が複数ある場合は元スコア最高 parent が受け取り、他の parent は維持） |
+| 6 | 最高スコアの `_SCORE_RETAIN_RATIO`（= 0.6）倍未満を削除 |
+| 7 | 残数 < `new_top_k` なら `new_top_k` を残数に再修正、そうでなければ上位 `new_top_k` 件を返す |
 
 ### 実装上の意思決定
 
@@ -53,7 +53,7 @@
   するため、ロジックの「引き継ぎ」を `max` で実装。
 - **互換性**: `parent_chunk_id` / `child_chunk_id` / `chunk_role` を持たない
   チャンク（chunking_logic_01〜05 など）は、グループ化対象から外し（`others`
-  バケットへ）削除や引き継ぎを受けない。step 1/2/7/8 のみ適用される。
+  バケットへ）削除や引き継ぎを受けない。step 1/6/7 のみ適用される。
 - **スコア集約用の値**: `final_score` を採用（vector hit では
   `vector_score_norm` と同値、keyword hit でも `keyword_weight *
   keyword_score_norm` として 0..1 に揃っている）。
@@ -127,7 +127,7 @@ step 5 は `child_chunk_id` で `role="child"` のチャンクを探すが存在
 
 ---
 
-## 2026-05-01: step 7 をギャップ検出ベースの閾値に変更
+## 2026-05-01: step 7 をギャップ検出ベースの閾値に変更（後に廃止）
 
 ### 問題
 
@@ -143,15 +143,32 @@ step 5 は `child_chunk_id` で `role="child"` のチャンクを探すが存在
   「有意な境界」とみなし、ギャップ上側のスコアを閾値とする。
 - 均質な分布（有意なギャップなし）は `avg_score` にフォールバック。
 
-**挙動例:**
-
-| スコア分布 | gaps | max/avg 倍率 | 結果 |
-| --------- | ---- | ----------- | ---- |
-| [0.95, 0.90, 0.85, 0.60, 0.55, 0.50] | [0.05, 0.05, 0.25, 0.05, 0.05] | 2.78 倍 | 閾値=0.85、上位3件を保持 |
-| [0.80, 0.78, 0.75, 0.70, 0.65] | [0.02, 0.03, 0.05, 0.05] | 1.33 倍 | 均質→avg_score フォールバック |
-
 **チューニング:** `_GAP_SIGNIFICANCE_FACTOR`（デフォルト 2.0）を下げると感度が上がり、上げると保守的になる。
+
+→ 実運用で絞りすぎが発生。下記 max ratio 方式に切り替え。
+
+---
+
+## 2026-05-01: step 6 をギャップ検出から max ratio 方式に変更
+
+### 問題
+
+ギャップ検出（`_GAP_SIGNIFICANCE_FACTOR = 2.0`）が実運用で絞りすぎになり、
+LLM へのコンテキストが少なくなりすぎる事例が発生した。
+
+### 修正
+
+**max ratio 方式** に変更。
+
+- `threshold = max_score * _SCORE_RETAIN_RATIO`（デフォルト 0.6）
+- ベストスコアの 60% 以上を保持する。分布形状に依存しないため予測しやすい。
+
+**チューニング:** `_SCORE_RETAIN_RATIO` を上げると絞られ（0.8 なら上位20%相当）、
+下げると多く残る。
 
 ### 変更ファイル
 
-- `backend/app/rag/logic/reranking/reranking_logic_02.py`: `_GAP_SIGNIFICANCE_FACTOR` 定数追加、`_gap_based_threshold` 関数追加、step 7 を差し替え。
+- `backend/app/rag/logic/reranking/reranking_logic_02.py`:
+  - `_GAP_SIGNIFICANCE_FACTOR` 定数・`_gap_based_threshold` 関数を削除
+  - `_SCORE_RETAIN_RATIO = 0.6` 定数を追加
+  - step 6 を `max_score * _SCORE_RETAIN_RATIO` 閾値に差し替え
