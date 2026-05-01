@@ -33,10 +33,10 @@ from app.rag.schemas import RetrievedChunk
 # -----------------------------------------------------------------------------
 
 
-_MIN_TOP_K = 5
-_TOP_K_DIVISOR = 6
+_MIN_TOP_K = 4
+_TOP_K_DIVISOR = 10
 # ベストスコアに対する保持下限の比率。小さいほど多く残り、大きいほど絞られる。
-_SCORE_RETAIN_RATIO = 0.6
+_SCORE_RETAIN_RATIO = 0
 
 
 def rerank(
