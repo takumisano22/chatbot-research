@@ -1,5 +1,4 @@
-# サンプル research_pair。実行前に qa_datasets / ingest_document を実データで埋めてください。
-research_pair_id: RP-RE-0001
+research_pair_id: RP-rE-0001
 llm_model: dsasai/llama3-elyza-jp-8b
 embedding_provider: ruri_http
 embedding_base_url: http://host.docker.internal:8010
@@ -9,7 +8,7 @@ search_logic_id: logic_01
 chunking_logic_id: logic_03
 reranking_logic_id: logic_01
 tokenizer_logic_id: logic_01
-prompt_logic_id: logic_05
+prompt_logic_id: logic_06
 
 top_k: 4
 qa_dataset: standard_qa.json
