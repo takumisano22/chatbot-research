@@ -54,3 +54,5 @@ RP-C-rerank3-0001.yaml
 RP-G-rerank3-0001.yaml
 RP-C-rerank3-0002.yaml
 RP-G-rerank3-0002.yaml
+RP-C-rerank3-promp9-0001.yaml
+RP-G-rerank3-promp9-0001.yaml
