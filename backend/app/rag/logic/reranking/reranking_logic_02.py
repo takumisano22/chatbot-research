@@ -31,6 +31,9 @@ from app.rag.schemas import RetrievedChunk
 
 _MIN_TOP_K = 5
 _TOP_K_DIVISOR = 6
+# 最大ギャップが平均ギャップの何倍以上であれば「有意な境界」とみなすか。
+# 小さいほど感度が高く（より弱いギャップでも切る）、大きいほど保守的。
+_GAP_SIGNIFICANCE_FACTOR = 2.0
 
 
 def rerank(
@@ -103,8 +106,11 @@ def rerank(
         require_min_from_count=2,
     )
 
-    # 7. 平均スコア未満を除外
-    items = [it for it in items if it.score >= avg_score]
+    # 7. ギャップ検出でスコアの不連続点を探し、その下側を除外する。
+    #    明確なギャップがない均質な分布では avg_score にフォールバックする。
+    scores_desc = sorted((it.score for it in items), reverse=True)
+    threshold = _gap_based_threshold(scores_desc, fallback=avg_score)
+    items = [it for it in items if it.score >= threshold]
 
     # 8. 残数 < new_top_k なら topK を残数に修正、そうでなければ上位 new_top_k を返す。
     items.sort(key=lambda it: it.score, reverse=True)
@@ -145,6 +151,29 @@ class _Item:
     def to_chunk(self) -> RetrievedChunk:
         # 引き継ぎ後のスコアを final_score として返却用 chunk に反映する。
         return self.chunk.model_copy(update={"final_score": self.score})
+
+
+def _gap_based_threshold(scores_desc: list[float], fallback: float) -> float:
+    """降順スコアリストから最大ギャップ位置の上側スコアを閾値として返す。
+
+    スコアをギャップで区切り「高品質クラスタ / 低品質クラスタ」に分離する。
+    最大ギャップが平均ギャップの _GAP_SIGNIFICANCE_FACTOR 倍未満の場合は
+    均質な分布とみなし fallback を返す。
+
+    例: [0.95, 0.90, 0.85, 0.60, 0.55, 0.50]
+        gaps = [0.05, 0.05, 0.25, 0.05, 0.05]
+        最大ギャップ 0.25 が avg 0.09 の 2.78 倍 → 閾値 = 0.85
+    """
+    if len(scores_desc) < 2:
+        return fallback
+    gaps = [scores_desc[i] - scores_desc[i + 1] for i in range(len(scores_desc) - 1)]
+    max_gap = max(gaps)
+    avg_gap = sum(gaps) / len(gaps)
+    if avg_gap == 0 or max_gap < avg_gap * _GAP_SIGNIFICANCE_FACTOR:
+        return fallback
+    gap_idx = gaps.index(max_gap)
+    # ギャップの上側スコア（このスコア以上を保持する）
+    return scores_desc[gap_idx]
 
 
 def _dedupe_by_chunk_id(items: list[_Item]) -> list[_Item]:
