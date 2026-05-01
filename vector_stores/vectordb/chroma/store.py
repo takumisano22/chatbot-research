@@ -135,15 +135,18 @@ def is_embedding_dimension_mismatch_error(exc: Exception) -> bool:
 def _ids_documents_metadatas(
     chunks: list[ChunkRecord],
 ) -> tuple[list[str], list[str], list[dict[str, Any]]]:
-    ids = [c.chunk_id for c in chunks]
+    ids: list[str] = []
     documents = [c.document_lower for c in chunks]
     metadatas: list[dict[str, Any]] = []
     for c in chunks:
         # ロジック由来 metadata を Chroma 制約に合わせて平坦化してから、
         # 予約キー (固定 4 キー) で上書きする。
         meta = _flatten_for_chroma(c.metadata or {})
+        vector_record_id = str(meta.get("vector_record_id") or c.chunk_id)
+        logical_chunk_id = str(meta.get("logical_chunk_id") or c.chunk_id)
+        ids.append(vector_record_id)
         meta["doc_id"] = c.doc_id
-        meta["chunk_id"] = c.chunk_id
+        meta["chunk_id"] = logical_chunk_id
         meta["source"] = c.source
         meta["chunk_text"] = c.chunk_text
         metadatas.append(meta)

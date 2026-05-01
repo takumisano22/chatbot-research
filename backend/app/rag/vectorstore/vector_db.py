@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from app.core.adapters import VectorDbAdapterModule, load_vectordb_adapter
@@ -36,18 +37,9 @@ class RagWriteSession:
     def add_chunks(self, chunks: list[ChunkForStore]) -> None:
         if not chunks:
             return
-        documents = [c.document_lower for c in chunks]
-        records = [
-            self._vs.ChunkRecord(
-                chunk_id=c.chunk_id,
-                doc_id=c.doc_id,
-                source=c.source,
-                chunk_text=c.chunk_text,
-                document_lower=c.document_lower,
-                metadata=c.metadata,
-            )
-            for c in chunks
-        ]
+        expanded = _expand_chunks_for_vector_records(chunks)
+        documents = [record["document_lower"] for record in expanded]
+        records = [self._chunk_record_from_expanded(record) for record in expanded]
         embeddings = self._embedding_service.embed_texts(documents)
         try:
             self._inner.add_chunks(records, embeddings)
@@ -61,6 +53,16 @@ class RagWriteSession:
 
     def delete_by_source(self, source: str) -> None:
         self._inner.delete_by_source(source)
+
+    def _chunk_record_from_expanded(self, record: dict[str, Any]) -> Any:
+        return self._vs.ChunkRecord(
+            chunk_id=record["vector_record_id"],
+            doc_id=record["doc_id"],
+            source=record["source"],
+            chunk_text=record["chunk_text"],
+            document_lower=record["document_lower"],
+            metadata=record["metadata"],
+        )
 
 
 def rag_write_session(settings: Settings) -> RagWriteSession:
@@ -133,6 +135,56 @@ def _min_max_normalize(raws: list[float]) -> list[float]:
     if hi <= lo:
         return [1.0 for _ in raws]
     return [(raw - lo) / (hi - lo) for raw in raws]
+
+
+def _expand_chunks_for_vector_records(chunks: list[ChunkForStore]) -> list[dict[str, Any]]:
+    """1 論理チャンクを、保存する検索用テキスト数だけ Chroma レコードへ展開する。"""
+    expanded: list[dict[str, Any]] = []
+    for chunk in chunks:
+        variants = _vector_text_variants(chunk)
+        multi_variant = bool(chunk.vector_texts)
+        for variant_name, vector_text in variants:
+            vector_record_id = (
+                _vector_record_id(chunk.chunk_id, variant_name)
+                if multi_variant
+                else chunk.chunk_id
+            )
+            metadata = dict(chunk.metadata)
+            if multi_variant:
+                metadata["logical_chunk_id"] = chunk.chunk_id
+                metadata["vector_record_id"] = vector_record_id
+                metadata["vector_text_variant"] = variant_name
+                metadata["vector_text_variant_count"] = len(variants)
+            expanded.append(
+                {
+                    "vector_record_id": vector_record_id,
+                    "doc_id": chunk.doc_id,
+                    "source": chunk.source,
+                    "chunk_text": chunk.chunk_text,
+                    "document_lower": vector_text.lower(),
+                    "metadata": metadata,
+                }
+            )
+    return expanded
+
+
+def _vector_text_variants(chunk: ChunkForStore) -> list[tuple[str, str]]:
+    if chunk.vector_texts:
+        variants = [
+            (str(name), text)
+            for name, text in chunk.vector_texts.items()
+            if str(name).strip() and text.strip()
+        ]
+        if variants:
+            return variants
+    return [("default", chunk.document_lower)]
+
+
+def _vector_record_id(chunk_id: str, variant_name: str) -> str:
+    safe_variant = re.sub(r"[^0-9A-Za-z_.-]+", "_", variant_name).strip("_")
+    if not safe_variant:
+        safe_variant = "vector"
+    return f"{chunk_id}::vector::{safe_variant}"
 
 
 def _vector_hits_to_retrieved_chunks(hits: list[Any]) -> list[RetrievedChunk]:

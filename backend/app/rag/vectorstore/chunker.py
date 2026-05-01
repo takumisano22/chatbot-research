@@ -35,7 +35,8 @@ def build_chunks_for_source(
     for i, item in enumerate(items):
         text = item["text"]
         chunk_id = f"{doc_id}:{i}"
-        document_lower = text.lower()
+        vector_texts = _normalize_vector_texts(item.get("vector_texts"))
+        document_lower = _first_vector_text(vector_texts, fallback=text).lower()
         out.append(
             ChunkForStore(
                 chunk_id=chunk_id,
@@ -43,6 +44,7 @@ def build_chunks_for_source(
                 source=repo_relative_source,
                 chunk_text=text,
                 document_lower=document_lower,
+                vector_texts=vector_texts,
                 metadata=dict(item.get("metadata") or {}),
             )
         )
@@ -73,6 +75,9 @@ class ChunkForStore:
     # backend 側のデフォルトで生成・上書きされるため、metadata 側にこれらと
     # 同名キーを入れても vectordb の必須フィールドには影響しない。
     metadata: dict[str, Any] = field(default_factory=dict)
+    # logic_06 など、1 論理チャンクから複数の検索用テキストを持つ場合だけ利用する。
+    # 空なら document_lower を 1 本だけ保存する従来互換の経路になる。
+    vector_texts: dict[str, str] = field(default_factory=dict)
 
 
 def _resolve_chunk_items(
@@ -82,7 +87,11 @@ def _resolve_chunk_items(
         text=text, chunk_size=chunk_size, chunk_overlap=chunk_overlap
     )
     return [
-        {"text": r.get("text", ""), "metadata": r.get("metadata") or {}}
+        {
+            "text": r.get("text", ""),
+            "metadata": r.get("metadata") or {},
+            "vector_texts": _normalize_vector_texts(r.get("vector_texts")),
+        }
         for r in raw
         if r.get("text")
     ]
@@ -90,3 +99,21 @@ def _resolve_chunk_items(
 
 def _stable_doc_id(source_key: str) -> str:
     return hashlib.sha256(source_key.encode("utf-8")).hexdigest()[:16]
+
+
+def _normalize_vector_texts(raw: Any) -> dict[str, str]:
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, str] = {}
+    for key, value in raw.items():
+        name = str(key).strip()
+        text = str(value).strip() if value is not None else ""
+        if name and text:
+            out[name] = text
+    return out
+
+
+def _first_vector_text(vector_texts: dict[str, str], *, fallback: str) -> str:
+    if vector_texts:
+        return next(iter(vector_texts.values()))
+    return fallback

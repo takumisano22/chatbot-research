@@ -1617,6 +1617,54 @@ def _demote_standalone_h4_prefixes_to_bullets(text: str) -> str:
     return re.sub(r"(^|\n)#### ", r"\1- ", text)
 
 
+def _markdown_to_vector_text(text: str) -> str:
+    """検索用に Markdown の構造記号だけを外したテキストへ変換する。"""
+    lines: list[str] = []
+    for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        stripped = line.strip()
+        if not stripped:
+            lines.append("")
+            continue
+        stripped = re.sub(r"^#{1,6}\s+", "", stripped)
+        stripped = re.sub(r"^[-*+]\s+", "", stripped)
+        stripped = re.sub(r"^>\s*", "", stripped)
+        stripped = re.sub(r"`([^`]+)`", r"\1", stripped)
+        stripped = re.sub(r"\*\*([^*]+)\*\*", r"\1", stripped)
+        stripped = re.sub(r"__([^_]+)__", r"\1", stripped)
+        lines.append(stripped)
+    return "\n".join(lines).strip()
+
+
+def _remove_document_and_parent_heading_lines(text: str) -> str:
+    """子/孫チャンクの検索用に、文書タイトル (#) と親章 (##) の行だけを落とす。"""
+    kept: list[str] = []
+    for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        stripped = line.lstrip()
+        if re.match(r"^#{1,2}(?!#)\s+", stripped):
+            continue
+        kept.append(line)
+    return "\n".join(kept).strip()
+
+
+def _build_vector_texts_for_chunk(text: str, metadata: dict[str, Any]) -> dict[str, str]:
+    """論理チャンク 1 件に対する検索用テキスト群を作る。"""
+    full_context = _markdown_to_vector_text(text)
+    vector_texts: dict[str, str] = {}
+    if full_context:
+        vector_texts["full_context_plain"] = full_context
+
+    # 親チャンクは上層文脈が検索価値そのものなので、局所文脈版は子/孫に限定する。
+    if metadata.get("chunk_role") in {"child", "grandchild"} and int(
+        metadata.get("level", 0)
+    ) >= 2:
+        local_context = _markdown_to_vector_text(
+            _remove_document_and_parent_heading_lines(text)
+        )
+        if local_context and local_context != full_context:
+            vector_texts["local_context_plain"] = local_context
+    return vector_texts
+
+
 # セクションツリーを RAG 投入用チャンク配列へ平坦化する。
 #
 # 事前に _format_subtree() でツリー全体をマークダウン化し、各ノードの装飾済みテキスト
@@ -1771,16 +1819,18 @@ def flatten_chunks(
         n = len(parts)
         for pi, part in enumerate(parts):
             cid = f"{base_id}_p{pi}" if n > 1 else base_id
+            meta = _build_meta(
+                cid, node, path, section_parent_id, ancestor_chain,
+                split_index=pi, split_total=n,
+                parent_chunk_id=parent_chunk_id,
+                child_chunk_id=child_chunk_id,
+                grandchild_chunk_id=grandchild_chunk_id,
+            )
             chunks.append({
                 "id": cid,
                 "text": part,
-                "metadata": _build_meta(
-                    cid, node, path, section_parent_id, ancestor_chain,
-                    split_index=pi, split_total=n,
-                    parent_chunk_id=parent_chunk_id,
-                    child_chunk_id=child_chunk_id,
-                    grandchild_chunk_id=grandchild_chunk_id,
-                ),
+                "metadata": meta,
+                "vector_texts": _build_vector_texts_for_chunk(part, meta),
             })
 
     # 子(level=2)が独立チャンクとして採用される条件。_emit_child のロジックと一致させ、
@@ -2070,15 +2120,23 @@ def flatten_chunks(
 
     # 0 件時の最終フォールバック（最低 1 チャンクを補償）。
     if not chunks:
+        fallback_text = root.text.strip() or "(empty)"
+        fallback_meta = _build_meta(
+            f"chunk_{root.id}", root, [root.heading], None, [],
+        )
         chunks.append({
             "id": f"chunk_{root.id}",
-            "text": root.text.strip() or "(empty)",
-            "metadata": _build_meta(
-                f"chunk_{root.id}", root, [root.heading], None, [],
+            "text": fallback_text,
+            "metadata": fallback_meta,
+            "vector_texts": _build_vector_texts_for_chunk(
+                fallback_text, fallback_meta
             ),
         })
     for ch in chunks:
         ch["text"] = _demote_standalone_h4_prefixes_to_bullets(ch["text"])
+        ch["vector_texts"] = _build_vector_texts_for_chunk(
+            ch["text"], ch.get("metadata", {})
+        )
     return chunks
 
 
@@ -2104,7 +2162,11 @@ def split_for_rag_with_metadata(
     )
     root = build_section_tree(normalized, candidates, config)
     return [
-        {"text": c["text"], "metadata": c.get("metadata", {})}
+        {
+            "text": c["text"],
+            "metadata": c.get("metadata", {}),
+            "vector_texts": c.get("vector_texts", {}),
+        }
         for c in flatten_chunks(root, config)
         if c["text"]
     ]
