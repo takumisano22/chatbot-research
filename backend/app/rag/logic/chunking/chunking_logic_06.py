@@ -97,6 +97,8 @@ SCOPE_W_PREFERRED = 2.0
 SCOPE_HEAD_ZONE = 0.15             # 「スコープ先頭付近」判定の共通比率
 SCOPE_COVERAGE_SOLO_HEAD = 1.0     # 単独で先頭付近にあるときの coverage
 SCOPE_COVERAGE_SOLO_OTHER = 0.3    # 単独で先頭付近以外にあるときの coverage
+RAW_INNER_ENUM_CONTAINMENT = 0.4   # 候補化されない本文列挙を containment に反映する比率
+OPEN_TAIL_CONTAINMENT_WEIGHT = 0.4 # 最後の兄弟から scope_end までの開区間を補助評価する重み
 
 # --- 共通閾値 ---
 GAP_OUTER_RATIO = 0.8              # A_gap > B_gap * 0.8 で A は B の外側候補
@@ -1118,8 +1120,8 @@ def _score_type_in_scope(
 # 含む区間の比率を返す。最外側階層を見抜くための主信号。
 #
 # 区間の取り方（"連番かつ閉じられている" の評価）:
-#   - count >= 2: 連続する同 type ノード間（閉区間）のみを計上。最後のノードから scope_end
-#                 までの open な末尾は計上しない（外側 type を内包と誤評価しないため）。
+#   - count >= 2: 連続する同 type ノード間（閉区間）を計上。最後のノードから scope_end
+#                 までの open な末尾は、内側連番が実際に見つかったときだけ低重みで計上する。
 #   - count == 1: スコープ先頭付近にある場合のみ wrapper 候補として (node, scope_end) を 1 区間扱い。
 #                 中ほどの単独出現は子要素である可能性が高く wrapper 扱いしない。
 def _interval_containment(
@@ -1133,18 +1135,25 @@ def _interval_containment(
     if not positions:
         return 0.0
 
+    own_type = group[0].heading_type
+    node_by_start = {n.start_char: n for n in group}
+
     if len(positions) == 1:
         scope_size = max(scope_end - scope_start, 1)
         head_zone = scope_start + scope_size * SCOPE_HEAD_ZONE
         if positions[0] > head_zone:
             return 0.0
-        boundaries: list[tuple[int, int]] = [(positions[0], scope_end)]
+        boundaries: list[tuple[int, int, float]] = [(positions[0], scope_end, 1.0)]
     else:
-        boundaries = list(zip(positions, positions[1:]))
+        boundaries = [(a, b, 1.0) for a, b in zip(positions, positions[1:])]
+        # 末尾の条などが列挙を持つ場合だけ、開区間を補助的に加点対象へ入れる。
+        if positions[-1] < scope_end:
+            boundaries.append((positions[-1], scope_end, OPEN_TAIL_CONTAINMENT_WEIGHT))
 
-    own_type = group[0].heading_type
-    n_with_seq = 0
-    for a, b in boundaries:
+    weighted_hits = 0.0
+    weighted_total = 0.0
+    for a, b, weight in boundaries:
+        sequence_strength = 0.0
         for inner_type, inner_group in all_groups.items():
             if inner_type == own_type:
                 continue
@@ -1164,10 +1173,43 @@ def _interval_containment(
                 for i in range(len(inner_vals) - 1)
             )
             if consecutive:
-                n_with_seq += 1
+                sequence_strength = 1.0
                 break
 
-    return n_with_seq / len(boundaries)
+        if sequence_strength <= 0.0:
+            outer_node = node_by_start.get(a)
+            if outer_node and _has_raw_inner_enumeration_sequence(outer_node.text, own_type):
+                # raw 行由来の信号は、候補ノード同士の包含より弱く扱う。
+                # 章より条が強くなりすぎる副作用を避けつつ、条直下の列挙は評価する。
+                sequence_strength = RAW_INNER_ENUM_CONTAINMENT
+
+        # open tail はヒットしない限り分母にも入れず、既存の閉区間評価を弱めない。
+        if weight < 1.0 and sequence_strength <= 0.0:
+            continue
+
+        weighted_total += weight
+        weighted_hits += weight * sequence_strength
+
+    return weighted_hits / weighted_total if weighted_total else 0.0
+
+
+def _has_raw_inner_enumeration_sequence(text: str, outer_type: str) -> bool:
+    """候補化されなかった長い列挙行も、wrapper 判定の補助信号として拾う。"""
+    outer_hint = _hint_for_type(outer_type)
+    values_by_type: dict[str, list[int]] = defaultdict(list)
+    for line in text.split("\n"):
+        item = _classify_enum_item(line)
+        if item is None:
+            continue
+        inner_type, value = item
+        if inner_type == outer_type:
+            continue
+        # 同階層以下のノード自身の連番ではなく、より内側の列挙だけを加点根拠にする。
+        if _hint_for_type(inner_type) <= outer_hint:
+            continue
+        values_by_type[inner_type].append(value)
+
+    return any(_sequence_score(values) > 0.0 for values in values_by_type.values())
 
 
 # 見出し抽出ゼロ時の最終フォールバック。段落単位で children を作る。
