@@ -19,6 +19,13 @@ from app.rag.schemas import RetrievedChunk
 #
 # 互換性: 必要キーが metadata に無い候補（非構造化チャンクなど）はグループ化
 # 対象から外し、削除や引き継ぎの影響を受けない設計とする。
+#
+# 子省略（merge_child）ケースの特記:
+#   chunking_logic_06 は親章内の子(条)が1件のみの場合、子チャンクを emit せず
+#   親チャンクが子の metadata を兼ねる（child_chunk_id = 親自身の chunk_id）。
+#   一方その子配下の孫は独立 emit されるため、孫の child_chunk_id が指す ID は
+#   ベクトル DB に存在しない。これを「孤立孫」として検出し、step 5b で親へ
+#   引き継いで削除することで親・孫の重複出力を防ぐ。
 # -----------------------------------------------------------------------------
 
 
@@ -80,6 +87,11 @@ def rerank(
         to_role="child",
         require_min_from_count=1,
     )
+
+    # 5b. 子省略（merge_child）ケース: step 5 で対応 child が見つからず残った孤立孫を、
+    #     parent_chunk_id をキーに親チャンクへ引き継いで削除する。
+    #     （孤立孫とは child_chunk_id に対応する chunk が存在しない grandchild のこと）
+    items = _promote_orphan_grandchildren(items)
 
     # 6. 同一 parent_chunk_id に child が 2件以上残っていて parent が居る場合、
     #    child 最高スコアを代表 parent に引き継ぎ、同 parent_chunk_id の child を全削除。
@@ -181,6 +193,54 @@ def _drop_lower_descendants(
             if m.role in drop_roles and m.score < anchor:
                 continue
             survivors.append(m)
+    return survivors
+
+
+def _promote_orphan_grandchildren(items: list[_Item]) -> list[_Item]:
+    """子省略（merge_child）ケースで生じる孤立孫を親チャンクへ引き継いで削除する。
+
+    孤立孫の定義: chunk_role="grandchild" かつ child_chunk_id に対応する chunk が
+    現在のワークセットに存在しないもの。
+    chunking_logic_06 では子(条)が 1 件のみの場合に子チャンクを emit せず親が兼ねるが、
+    孫は独立 emit されるため、孫の child_chunk_id 先が存在しないギャップが生まれる。
+    """
+    chunk_id_set = {it.chunk.chunk_id for it in items if it.chunk.chunk_id}
+
+    orphans = [
+        it for it in items
+        if it.role == "grandchild"
+        and it.meta("child_chunk_id") is not None
+        and it.meta("child_chunk_id") not in chunk_id_set
+    ]
+    if not orphans:
+        return items
+
+    # parent_chunk_id でグループ化して対応する親チャンクへ引き継ぐ。
+    groups: dict[str, list[_Item]] = defaultdict(list)
+    for it in orphans:
+        pk = it.meta("parent_chunk_id")
+        if pk:
+            groups[pk].append(it)
+
+    orphan_set = set(orphans)
+    survivors = [it for it in items if it not in orphan_set]
+
+    # chunk_id → _Item の逆引き（親チャンク検索用）。
+    by_chunk_id: dict[str, _Item] = {
+        it.chunk.chunk_id: it for it in survivors if it.chunk.chunk_id
+    }
+
+    for parent_chunk_id_val, grandchildren in groups.items():
+        parent_item = by_chunk_id.get(parent_chunk_id_val)
+        if parent_item is None:
+            # 親チャンクが取得されていなければ孤立孫をそのまま残す。
+            survivors.extend(grandchildren)
+            continue
+        donor_score = max(it.score for it in grandchildren)
+        if donor_score > parent_item.score:
+            parent_item.score = donor_score
+        # grandchild は削除（survivors には追加しない）。
+
     return survivors
 
 

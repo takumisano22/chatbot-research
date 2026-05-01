@@ -61,3 +61,36 @@
 ### 変更ファイル
 
 - `backend/app/rag/logic/reranking/reranking_logic_02.py`: 上記 8 ステップを実装。
+
+---
+
+## 2026-05-01: 子省略（merge_child）ケースの孤立孫問題を修正
+
+### 問題
+
+`第5章介護休暇` 配下の条（子）が 1 件のみの場合 `merge_child=True` となり、子
+チャンクは emit されず親チャンクが兼ねる。しかし子配下の孫（各項）は独立して
+emit される。
+
+| チャンク | chunk_role | child_chunk_id |
+| ------- | ---------- | -------------- |
+| 親 (第5章) | parent | 自身の chunk_id（自己参照） |
+| 孫 (各項) | grandchild | `chunk_art13`（= emit されていない子の ID） |
+
+step 5 は `child_chunk_id` で `role="child"` のチャンクを探すが存在しないため
+孫が削除されず、親と孫が両方コンテキストに残る重複が生じていた。
+
+### 修正方針
+
+`chunking_logic_06.py` の修正は不要。`reranking_logic_02.py` に **step 5b** を
+追加し、「孤立孫（`child_chunk_id` に対応する chunk が存在しない grandchild）」
+を検出して `parent_chunk_id` をキーに親へ引き継ぎ・削除する。
+
+- 孤立検出: 現ワークセットの全 `chunk_id` 集合に `child_chunk_id` が含まれない grandchild
+- 親を `parent_chunk_id == chunk_id` で逆引き
+- donor_score（孤立孫の最大スコア）が親スコアを上回る場合のみ親スコアを更新
+- 対応する親チャンクが取得されていなければ孤立孫をそのまま残す（コンテキスト保護）
+
+### 変更ファイル
+
+- `backend/app/rag/logic/reranking/reranking_logic_02.py`: `_promote_orphan_grandchildren` を追加、step 5b として呼び出しを挿入。
