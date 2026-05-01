@@ -8,9 +8,13 @@ from urllib.parse import urlparse, urlunparse
 import httpx
 
 # -----------------------------------------------------------------------------
-# 役割: ruri-embed-service の POST /embed を叩く（model は応答との照合用）。
+# 役割: Ruri 系の POST /embed を叩く（model は応答との照合用）。
 # 流れ: build_ruri_http_embedding_service → RuriHttpEmbeddingService.embed_texts。
+# Ruri v3 の検索精度に合わせ、文書・クエリの prefix は HTTP 送信前にここで付ける。
 # -----------------------------------------------------------------------------
+
+DOCUMENT_PREFIX = "文章: "
+QUERY_PREFIX = "クエリ: "
 
 
 EmbeddingInputType = Literal["document", "query", "raw"]
@@ -50,9 +54,10 @@ class RuriHttpEmbeddingService:
         if not texts:
             return []
         url = f"{self._base_url}/embed"
+        prefixed_texts = [_apply_input_prefix(text, input_type) for text in texts]
         payload: dict[str, Any] = {
-            "texts": texts,
-            "input_type": input_type,
+            "texts": prefixed_texts,
+            "input_type": "raw",
             "normalize": self._normalize,
         }
         with httpx.Client(timeout=self._timeout) as client:
@@ -109,3 +114,11 @@ def _resolve_localhost_base_url_for_docker(base_url: str) -> str:
     host = "host.docker.internal"
     netloc = host if parsed.port is None else f"{host}:{parsed.port}"
     return urlunparse(parsed._replace(netloc=netloc))
+
+
+def _apply_input_prefix(text: str, input_type: EmbeddingInputType) -> str:
+    if input_type == "query":
+        return f"{QUERY_PREFIX}{text}"
+    if input_type == "document":
+        return f"{DOCUMENT_PREFIX}{text}"
+    return text

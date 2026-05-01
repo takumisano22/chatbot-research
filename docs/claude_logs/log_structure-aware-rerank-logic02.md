@@ -172,3 +172,26 @@ LLM へのコンテキストが少なくなりすぎる事例が発生した。
   - `_GAP_SIGNIFICANCE_FACTOR` 定数・`_gap_based_threshold` 関数を削除
   - `_SCORE_RETAIN_RATIO = 0.6` 定数を追加
   - step 6 を `max_score * _SCORE_RETAIN_RATIO` 閾値に差し替え
+
+---
+
+## 2026-05-01: reranking_logic_03 を新規作成（子→親集約を削除）
+
+### 目的
+
+`reranking_logic_02` では複数の子チャンクを親へ集約するため、長文の親チャンクが LLM コンテキストに入り推論精度が下がる場合があった。孫→子の集約は維持しつつ、子→親の集約のみ削除したバリアントを作成する。
+
+### 変更内容
+
+`reranking_logic_02` から削除したステップ:
+
+- **step 5**（旧）: 同一 `parent_chunk_id` に child が 2 件以上残っていて parent が居る場合、child 最高スコアを代表 parent に引き継ぎ、child を全削除
+
+維持したステップ:
+- step 2（parent があるなら低スコアの child/grandchild を落とす）→ 親がいる場合のフィルタであり、集約ではないため維持
+- step 4b（孤立孫を親へ引き継ぐ）→ merge_child ケースで親が子を兼ねる場合のみ適用。孫→子（=親）の集約として扱うため維持
+
+### 変更ファイル
+
+- `backend/app/rag/logic/reranking/reranking_logic_03.py`: 新規作成
+- `docs/structure_aware_logic06_rerank03_guide.md`: 新規作成
