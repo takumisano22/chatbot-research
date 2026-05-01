@@ -61,9 +61,10 @@ def test_reranking_logic_01_identity() -> None:
         final_score=1.0,
         retrieval_type="keyword",
     )
-    out = rr.rerank(settings, "q", [c])
-    assert len(out) == 1
-    assert out[0].chunk_id == "c"
+    chunks, k_eff = rr.rerank(settings, "q", [c], top_k=2)
+    assert k_eff == 2
+    assert len(chunks) == 1
+    assert chunks[0].chunk_id == "c"
 
 
 def test_preflight_import_search_logic_modules() -> None:

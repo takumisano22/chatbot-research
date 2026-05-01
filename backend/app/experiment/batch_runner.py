@@ -237,7 +237,14 @@ def _run_one_question(
         question,
         top_k=top_k,
     )
-    chunks = call_rerank("reranking", reranking_logic_id, runtime, question, chunks)
+    chunks, top_k = call_rerank(
+        "reranking",
+        reranking_logic_id,
+        runtime,
+        question,
+        chunks,
+        top_k=top_k,
+    )
     chunks = chunks[:top_k]
     t1 = time.monotonic()
     rag_ms = (t1 - t0) * 1000.0

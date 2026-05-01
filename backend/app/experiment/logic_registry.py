@@ -95,12 +95,20 @@ def call_rerank(
     settings: Settings,
     query: str,
     chunks: list[RetrievedChunk],
-) -> list[RetrievedChunk]:
+    *,
+    top_k: int,
+) -> tuple[list[RetrievedChunk], int]:
+    # rerank 関数契約: (list[RetrievedChunk], effective_top_k)。後段のプロンプト・CSV 列本数は effective_top_k に合わせる。
     fn = load_rerank_fn(category, logic_id)
-    out = fn(settings, query, chunks)
-    if not isinstance(out, list):
-        raise TypeError("rerank は list[RetrievedChunk] を返す必要があります")
-    return out
+    out = fn(settings, query, chunks, top_k=top_k)
+    if not isinstance(out, tuple) or len(out) != 2:
+        raise TypeError("rerank は (list[RetrievedChunk], int) のタプルを返す必要があります")
+    ranked, k_eff = out[0], out[1]
+    if not isinstance(ranked, list):
+        raise TypeError("rerank の第1要素は list である必要があります")
+    if not isinstance(k_eff, int) or k_eff < 0:
+        raise TypeError("rerank の第2要素は 0 以上の int である必要があります")
+    return ranked, k_eff
 
 
 def load_rag_system_message(logic_id: str) -> str:
