@@ -48,3 +48,5 @@ RP-C-rerank2-0002.yaml
 RP-G-rerank2-0002.yaml
 RP-C-rerank2-0003.yaml
 RP-G-rerank2-0003.yaml
+RP-C-rerank2-0004.yaml
+RP-G-rerank2-0004.yaml
