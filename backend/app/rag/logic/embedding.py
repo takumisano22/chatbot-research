@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Protocol, cast
+from typing import Literal, Protocol, cast
 
 from app.core.adapters import load_embedding_provider_adapter
 from app.core.config import Settings
@@ -13,8 +13,13 @@ from app.core.config import Settings
 # -----------------------------------------------------------------------------
 
 
+EmbeddingInputType = Literal["document", "query", "raw"]
+
+
 class EmbeddingService(Protocol):
-    def embed_texts(self, texts: list[str]) -> list[list[float]]:
+    def embed_texts(
+        self, texts: list[str], *, input_type: EmbeddingInputType = "document"
+    ) -> list[list[float]]:
         ...
 
 

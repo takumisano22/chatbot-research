@@ -27,6 +27,6 @@ def search_vector_chunks(
     query_vector = observe_vector_query_embedding(
         settings,
         query,
-        lambda: service.embed_texts([query])[0],
+        lambda: service.embed_texts([query], input_type="query")[0],
     )
     return rag_search_by_vector(settings, query_vector, k)

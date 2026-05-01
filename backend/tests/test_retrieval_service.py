@@ -118,8 +118,9 @@ def test_search_documents_vector_mode_wires_embed_and_store(
     captured: dict[str, object] = {}
 
     class FakeEmb:
-        def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        def embed_texts(self, texts: list[str], **kwargs: object) -> list[list[float]]:
             captured["texts"] = texts
+            captured["input_type"] = kwargs.get("input_type")
             return [[0.5, 0.25]]
 
     def fake_rag_search_by_vector(
@@ -138,5 +139,6 @@ def test_search_documents_vector_mode_wires_embed_and_store(
     out = rs.search_documents(settings, "hello", top_k=None)
     assert out == []
     assert captured["texts"] == ["hello"]
+    assert captured["input_type"] == "query"
     assert captured["qv"] == [0.5, 0.25]
     assert captured["top_k"] == 3

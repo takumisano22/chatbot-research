@@ -40,7 +40,7 @@ class RagWriteSession:
         expanded = _expand_chunks_for_vector_records(chunks)
         documents = [record["document_lower"] for record in expanded]
         records = [self._chunk_record_from_expanded(record) for record in expanded]
-        embeddings = self._embedding_service.embed_texts(documents)
+        embeddings = self._embedding_service.embed_texts(documents, input_type="document")
         try:
             self._inner.add_chunks(records, embeddings)
         except Exception as exc:

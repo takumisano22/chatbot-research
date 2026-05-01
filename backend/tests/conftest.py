@@ -14,7 +14,7 @@ def _offline_embedding_for_tests(request: pytest.FixtureRequest, monkeypatch: py
         return
 
     class _FakeEmbedding:
-        def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        def embed_texts(self, texts: list[str], **_: object) -> list[list[float]]:
             return [[0.01] * _OFFLINE_EMBEDDING_DIM for _ in texts]
 
     monkeypatch.setattr(

@@ -62,7 +62,7 @@ def get_model() -> SentenceTransformer:
 
 def apply_input_prefix(text: str, input_type: EmbeddingInputType) -> str:
     if input_type == "query":
-        return f"検索クエリ: {text}"
+        return f"クエリ: {text}"
     if input_type == "document":
-        return f"検索文書: {text}"
+        return f"文章: {text}"
     return text

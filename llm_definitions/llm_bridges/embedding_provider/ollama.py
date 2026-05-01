@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Literal, Protocol
 from urllib.parse import urlparse, urlunparse
 
 from langchain_ollama import OllamaEmbeddings
@@ -13,8 +13,13 @@ from langchain_ollama import OllamaEmbeddings
 # -----------------------------------------------------------------------------
 
 
+EmbeddingInputType = Literal["document", "query", "raw"]
+
+
 class EmbeddingService(Protocol):
-    def embed_texts(self, texts: list[str]) -> list[list[float]]:
+    def embed_texts(
+        self, texts: list[str], *, input_type: EmbeddingInputType = "document"
+    ) -> list[list[float]]:
         ...
 
 
@@ -29,7 +34,10 @@ class OllamaEmbeddingService:
     def __init__(self, embeddings: OllamaEmbeddings) -> None:
         self._embeddings = embeddings
 
-    def embed_texts(self, texts: list[str]) -> list[list[float]]:
+    def embed_texts(
+        self, texts: list[str], *, input_type: EmbeddingInputType = "document"
+    ) -> list[list[float]]:
+        _ = input_type
         return self._embeddings.embed_documents(texts)
 
 

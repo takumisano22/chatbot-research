@@ -6,6 +6,7 @@ from app.rag.vectorstore import vector_db as vdb
 
 def test_rag_write_session_add_chunks_passes_embeddings(monkeypatch) -> None:
     captured_embeddings: list[list[float]] | None = None
+    captured_input_type: object = None
 
     class FakeInnerSession:
         def add_chunks(self, _records, embeddings) -> None:
@@ -51,8 +52,10 @@ def test_rag_write_session_add_chunks_passes_embeddings(monkeypatch) -> None:
             return
 
     class FakeEmbeddingService:
-        def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        def embed_texts(self, texts: list[str], **kwargs: object) -> list[list[float]]:
+            nonlocal captured_input_type
             assert texts == ["hello world"]
+            captured_input_type = kwargs.get("input_type")
             return [[0.11, 0.22]]
 
     monkeypatch.setattr(vdb, "_vector_store", lambda _settings: FakeVectorStore)
@@ -77,6 +80,7 @@ def test_rag_write_session_add_chunks_passes_embeddings(monkeypatch) -> None:
     session.add_chunks(chunks)
 
     assert captured_embeddings == [[0.11, 0.22]]
+    assert captured_input_type == "document"
 
 
 def test_rag_write_session_retries_after_dimension_mismatch(monkeypatch) -> None:
@@ -130,7 +134,7 @@ def test_rag_write_session_retries_after_dimension_mismatch(monkeypatch) -> None
             reset_called = True
 
     class FakeEmbeddingService:
-        def embed_texts(self, _texts: list[str]) -> list[list[float]]:
+        def embed_texts(self, _texts: list[str], **_: object) -> list[list[float]]:
             return [[0.11, 0.22]]
 
     monkeypatch.setattr(vdb, "_vector_store", lambda _settings: FakeVectorStore)

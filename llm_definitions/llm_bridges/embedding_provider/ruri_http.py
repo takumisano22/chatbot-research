@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 from urllib.parse import urlparse, urlunparse
 
 import httpx
@@ -13,8 +13,13 @@ import httpx
 # -----------------------------------------------------------------------------
 
 
+EmbeddingInputType = Literal["document", "query", "raw"]
+
+
 class EmbeddingService(Protocol):
-    def embed_texts(self, texts: list[str]) -> list[list[float]]:
+    def embed_texts(
+        self, texts: list[str], *, input_type: EmbeddingInputType = "document"
+    ) -> list[list[float]]:
         ...
 
 
@@ -39,13 +44,15 @@ class RuriHttpEmbeddingService:
         self._normalize = normalize
         self._timeout = timeout_seconds
 
-    def embed_texts(self, texts: list[str]) -> list[list[float]]:
+    def embed_texts(
+        self, texts: list[str], *, input_type: EmbeddingInputType = "document"
+    ) -> list[list[float]]:
         if not texts:
             return []
         url = f"{self._base_url}/embed"
         payload: dict[str, Any] = {
             "texts": texts,
-            "input_type": "document",
+            "input_type": input_type,
             "normalize": self._normalize,
         }
         with httpx.Client(timeout=self._timeout) as client:
