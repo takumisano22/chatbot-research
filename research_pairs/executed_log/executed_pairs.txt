@@ -83,3 +83,7 @@ RP-C-rerank2r-promp10rrrr-0001.yaml
 RP-E-rerank2r-promp10rrrr-0001.yaml
 RP-G-rerank2r-promp10rrrr-0001.yaml
 RP-Q-rerank2r-promp10rrrr-0001.yaml
+RP-C-rerank2r-promp10rrrrr-0001.yaml
+RP-E-rerank2r-promp10rrrrr-0001.yaml
+RP-G-rerank2r-promp10rrrrr-0001.yaml
+RP-Q-rerank2r-promp10rrrrr-0001.yaml
