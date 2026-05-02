@@ -1,6 +1,6 @@
 # サンプル research_pair。実行前に qa_datasets / ingest_document を実データで埋めてください。
-research_pair_id: RP-C-rerank2r-promp10rr-0001
-llm_model: llama3.2
+research_pair_id: RP-G-rerank2r-promp10rrr-0001
+llm_model: gemma3:12b-it-q4_K_M
 embedding_provider: ruri_http
 embedding_base_url: http://host.docker.internal:8010
 embedding_model: cl-nagoya/ruri-v3-310m
