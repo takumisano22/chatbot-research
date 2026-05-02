@@ -64,3 +64,6 @@ RP-chunking1-C-promp10-0001.yaml
 RP-chunking1-G-promp10-0001.yaml
 RP-E-rerank3-promp10-0001.yaml
 RP-Q-rerank3-promp10-0001.yaml
+RP-E-rerank2r-promp10-0001.yaml
+RP-G-rerank2r-promp10-0001.yaml
+RP-Q-rerank2r-promp10-0001.yaml
