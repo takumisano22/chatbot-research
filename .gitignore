@@ -13,6 +13,7 @@ qa_datasets/*.json
 .claude/*
 .cursor/*
 .cursorignore
+AGENTS.md
 agent-transcripts/
 mcps/
 
@@ -43,6 +44,7 @@ venv/
 *.whl
 
 # --- テスト支援・型チェックの生成物 ---
+**/tests/**
 .hypothesis/
 **/.hypothesis/
 **/.ipynb_checkpoints/
