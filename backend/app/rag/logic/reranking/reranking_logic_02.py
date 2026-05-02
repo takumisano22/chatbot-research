@@ -11,10 +11,10 @@ from app.rag.schemas import RetrievedChunk
 #
 # 主な処理:
 #   1. 元データ件数が下限 (_MIN_TOP_K) 未満ならフィルタせずそのまま返す。
-#   2. top_k を 1/6 と 5 の大きい方で再構築する。
+#   2. top_k を 1/10 と 4 の大きい方で再構築し、元候補の平均スコアを保持する。
 #   3. metadata の chunk_role / parent_chunk_id / child_chunk_id を用いて重複・冗長
 #      チャンクを段階的に削除し、孫→子→親へ代表スコアを引き継ぐ。
-#   4. 最高スコアの _SCORE_RETAIN_RATIO 倍未満を除外し、上位 new_top_k 件を返す。
+#   4. 親集約前に元候補の平均スコア以下を除外し、上位 new_top_k 件を返す。
 #
 # 互換性: 必要キーが metadata に無い候補（非構造化チャンクなど）はグループ化
 # 対象から外し、削除や引き継ぎの影響を受けない設計とする。
@@ -28,10 +28,8 @@ from app.rag.schemas import RetrievedChunk
 # -----------------------------------------------------------------------------
 
 
-_MIN_TOP_K = 5
-_TOP_K_DIVISOR = 6
-# ベストスコアに対する保持下限の比率。小さいほど多く残り、大きいほど絞られる。
-_SCORE_RETAIN_RATIO = 0.6
+_MIN_TOP_K = 4
+_TOP_K_DIVISOR = 10
 
 
 def rerank(
@@ -52,6 +50,7 @@ def rerank(
         return list(chunks), len(chunks)
 
     new_top_k = max(_MIN_TOP_K, top_k // _TOP_K_DIVISOR)
+    avg_score = sum(float(c.final_score) for c in chunks) / len(chunks)
 
     # final_score を集約用スコアとして使う（vector hit では vector_score_norm と同値）。
     items = [_Item(chunk=c, score=float(c.final_score)) for c in chunks]
@@ -91,7 +90,10 @@ def rerank(
     #     （孤立孫とは child_chunk_id に対応する chunk が存在しない grandchild のこと）
     items = _promote_orphan_grandchildren(items)
 
-    # 5. 同一 parent_chunk_id に child が 2件以上残っていて parent が居る場合、
+    # 5. 親への集約前に、元候補の平均スコア以下を除外して文脈の膨張を抑える。
+    items = [it for it in items if it.score > avg_score]
+
+    # 6. 同一 parent_chunk_id に child が 2件以上残っていて parent が居る場合、
     #    child 最高スコアを代表 parent に引き継ぎ、同 parent_chunk_id の child を全削除。
     items = _promote_score(
         items,
@@ -100,11 +102,6 @@ def rerank(
         to_role="parent",
         require_min_from_count=2,
     )
-
-    # 6. 最高スコアの _SCORE_RETAIN_RATIO 倍を閾値とし、それ未満を除外する。
-    max_score = max((it.score for it in items), default=0.0)
-    threshold = max_score * _SCORE_RETAIN_RATIO
-    items = [it for it in items if it.score >= threshold]
 
     # 7. 残数 < new_top_k なら topK を残数に修正、そうでなければ上位 new_top_k を返す。
     items.sort(key=lambda it: it.score, reverse=True)
